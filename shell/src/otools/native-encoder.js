@@ -15,15 +15,23 @@
  */
 import {
   available, channel, env, knownPath, joinPath, createDir, removeEntry,
-  writeFile, readFile, base64ToBlob, invokeNative,
+  writeFile, readFile, base64ToBlob, invokeNative, diag,
 } from './host.js';
 
 /** 进程内缓存探测结果（null=还没探）。H.264 导入只会稳定地「可用/不可用」。 */
 let availableCache = null;
+/** 最近一次探测的结论原因，供导出报错时告诉用户「原生 H.264 为什么没走」。 */
+let lastReason = 'not-probed';
 
 /** 仅测试用：清掉探测缓存。 */
 export function _resetNativeH264Availability() {
   availableCache = null;
+  lastReason = 'not-probed';
+}
+
+/** 最近一次 nativeH264Available() 为什么可用/不可用（同步读取；没探过返回 'not-probed'）。 */
+export function nativeH264Reason() {
+  return lastReason;
 }
 
 /** 宿主环境自报的平台；认不出来时返回 ''，交给后面的调用成败兜底。 */
@@ -46,18 +54,37 @@ function looksLikeMac() {
 export async function nativeH264Available() {
   if (availableCache !== null) return availableCache;
   availableCache = false;
+  const settle = (reason) => { lastReason = reason; return availableCache; };
   try {
-    if (!available() || channel() === 'none') return availableCache;
-    if (!looksLikeMac()) return availableCache;
-    const probe = await invokeNative('ffmpeg_probe', {});
+    if (!available() || channel() === 'none') {
+      diag({ nativeH264: false, nativeWhy: 'host-unavailable' });
+      return settle('host-unavailable');
+    }
+    if (!looksLikeMac()) {
+      diag({ nativeH264: false, nativeWhy: `not-mac:${hostPlatform() || 'unknown'}` });
+      return settle(`not-mac:${hostPlatform() || 'unknown'}`);
+    }
+    let probe;
+    try {
+      probe = await invokeNative('ffmpeg_probe', {});
+    } catch (err) {
+      // 原生库缺失 / 走包装失败 / 宿主没这条命令 / 权限拒绝——记下来，别吞。
+      diag({ nativeH264: false, nativeWhy: 'invoke-failed', nativeErr: String(err?.message || err) });
+      return settle('invoke-failed');
+    }
+    diag({ ffmpegProbe: probe });
     if (probe && probe.installed && probe.videoToolbox) {
       availableCache = true;
+      lastReason = 'ok';
+      diag({ nativeH264: true });
+      return availableCache;
     }
-  } catch {
-    // 原生库不在（普通浏览器 / 没打包本平台库）、宿主没这条命令……一律按不可用。
-    availableCache = false;
+    diag({ nativeH264: false, nativeWhy: 'ffmpeg-missing-or-no-videotoolbox', ffmpegProbe: probe });
+    return settle('ffmpeg-missing-or-no-videotoolbox');
+  } catch (err) {
+    diag({ nativeH264: false, nativeWhy: 'exception', nativeErr: String(err?.message || err) });
+    return settle('exception');
   }
-  return availableCache;
 }
 
 /** 建一个本次导出专用的临时目录（宿主 cache/appData/home 下）。 */

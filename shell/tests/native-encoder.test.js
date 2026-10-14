@@ -12,6 +12,7 @@ vi.mock('../src/otools/host.js', () => {
   const mock = {
     avail: true,
     probe: { installed: true, videoToolbox: true },
+    invokeThrows: false,
     writes: [],
     removed: [],
     encodes: [],
@@ -29,7 +30,9 @@ vi.mock('../src/otools/host.js', () => {
     writeFile: async (path) => { mock.writes.push(path); },
     readFile: async (path) => ({ path, dataBase64: 'QUFB' }),
     base64ToBlob: (b64, mime) => ({ __blob: true, mime, b64 }),
+    diag: () => {},
     invokeNative: async (method, payload) => {
+      if (mock.invokeThrows) throw new Error('native 调用失败');
       if (method === 'ffmpeg_probe') return mock.probe;
       if (method === 'encode_h264') { mock.encodes.push(payload); return { outputPath: payload.outputPath, bytes: 4 }; }
       throw new Error(`unknown method ${method}`);
@@ -38,7 +41,7 @@ vi.mock('../src/otools/host.js', () => {
 });
 
 const host = await import('../src/otools/host.js');
-const { nativeH264Available, exportVideoNativeH264, _resetNativeH264Availability } = await import('../src/otools/native-encoder.js');
+const { nativeH264Available, exportVideoNativeH264, nativeH264Reason, _resetNativeH264Availability } = await import('../src/otools/native-encoder.js');
 const mock = host.__mock;
 
 const fakeCanvas = () => ({ toDataURL: () => 'data:image/jpeg;base64,QUFBQg==' });
@@ -47,6 +50,7 @@ beforeEach(() => {
   _resetNativeH264Availability();
   mock.avail = true;
   mock.probe = { installed: true, videoToolbox: true };
+  mock.invokeThrows = false;
   mock.writes = [];
   mock.removed = [];
   mock.encodes = [];
@@ -55,18 +59,29 @@ beforeEach(() => {
 describe('nativeH264Available', () => {
   it('宿主可用 + mac + ffmpeg 带 videotoolbox → true', async () => {
     expect(await nativeH264Available()).toBe(true);
+    expect(nativeH264Reason()).toBe('ok');
   });
 
-  it('ffmpeg 没装 / 没 videotoolbox → false（回落 WebCodecs）', async () => {
+  it('ffmpeg 没装 / 没 videotoolbox → false（回落 WebCodecs）+ 原因可见', async () => {
     mock.probe = { installed: false, videoToolbox: false };
     expect(await nativeH264Available()).toBe(false);
+    expect(nativeH264Reason()).toBe('ffmpeg-missing-or-no-videotoolbox');
+    _resetNativeH264Availability();
     mock.probe = { installed: true, videoToolbox: false };
     expect(await nativeH264Available()).toBe(false);
+    expect(nativeH264Reason()).toBe('ffmpeg-missing-or-no-videotoolbox');
   });
 
   it('宿主不在（普通浏览器）→ false', async () => {
     mock.avail = false;
     expect(await nativeH264Available()).toBe(false);
+    expect(nativeH264Reason()).toBe('host-unavailable');
+  });
+
+  it('原生调用失败（库缺失/走不通/权限拒）→ false，不抛', async () => {
+    mock.invokeThrows = true;
+    expect(await nativeH264Available()).toBe(false);
+    expect(nativeH264Reason()).toBe('invoke-failed');
   });
 
   it('探测结果缓存，不重复触发 invoke', async () => {

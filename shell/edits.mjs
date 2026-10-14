@@ -431,9 +431,9 @@ const canSaveLocally = () => hostReady();`,
   {
     file: 'src/ui/export-dialog.js',
     find: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos } from '../otools/ui.js';",
-    replace: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos } from '../otools/ui.js';\nimport { probeCodecs, summarizeProbes } from '../otools/codec-probe.js';",
+    replace: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos } from '../otools/ui.js';\nimport { probeCodecs, summarizeProbes } from '../otools/codec-probe.js';\nimport { nativeH264Reason } from '../otools/native-encoder.js';",
     expect: 1,
-    why: '诊断：导入裸 WebCodecs 探测，卡住时告诉用户到底哪个编码真出不了帧',
+    why: '诊断：导入裸 WebCodecs 探测 + 原生 H.264 状态，卡住时告诉用户到底哪个编码真出不了帧、原生为什么没走',
   },
 
   /* ============================ 导出卡住时说清「停在哪一步」 ============================ */
@@ -718,7 +718,18 @@ export function currentExportParams() {
         // 先把明确的报错亮给用户；编码能力用**裸 WebCodecs** 探测确认（绕开渲染、
         // 绕开 mediabunny，只问浏览器自己能不能真编出帧），拿到结论后**就地补到报错里**。
         // 探测在后台跑，不阻塞报错显示。
+        // H.264 卡住时，把「原生硬件编码为什么没顶上」也讲清楚——否则用户只看到让换
+        // VP9，却不知道本机的 ffmpeg（h264_videotoolbox）装没装、原生快编能不能用。
+        let nativeHint = '';
+        if (stallKind === 'video' && s.codec === 'avc' && s.format === 'mp4') {
+          const why = nativeH264Reason();
+          if (why === 'ffmpeg-missing-or-no-videotoolbox') nativeHint = '原生 H.264 也没启用：本机未装 ffmpeg，或 ffmpeg 不含 h264_videotoolbox 编码器。装一下 brew install ffmpeg，就能用 Apple 硬件 H.264 稳定导出、不再卡 0%。';
+          else if (why === 'invoke-failed') nativeHint = '原生 H.264 也没启用：宿主原生编码调用失败。请确认装的是最新版插件、且宿主支持原生插件。';
+          else if (why === 'host-unavailable') nativeHint = '原生 H.264 也没启用：当前不在 OTools 宿主里。';
+          else if (why && why !== 'ok' && why !== 'not-probed') nativeHint = \`原生 H.264 也没启用：\${why}。\`;
+        }
         const lines = [h('p', headline)];
+        if (nativeHint) lines.push(h('p', nativeHint));
         if (stage) lines.push(h('p', \`卡在「\${stage}」这一步，之后一直没有进度。\`));
         const detail = h('p', '正在探测各编码能否真正出帧…');
         lines.push(detail);

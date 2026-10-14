@@ -174,21 +174,35 @@ function invokeRaw(command, payload) {
   return invoke(command, payload);
 }
 
+/** 只关心原生调用的宿主包装（不要求它有 dialog/readHostFile）。 */
+function nativeWrapper() {
+  const w = (typeof window !== 'undefined' && (window.otools || window.utools)) || null;
+  return w && typeof w.invokeNative === 'function' ? w : null;
+}
+
 /**
- * 调用本插件自带的原生 cdylib 方法（宿主 native_plugin_invoke）。
+ * 调用本插件自带的原生 cdylib 方法。
  *
- * 宿主会把插件返回的 {ok:false,error} 转成 Err 抛回来，所以这里：
- *   - 成功 → 解析出的 {ok:true,data}，取出并返回 data；
- *   - 插件报错 / 原生库不在 / 宿主没这条命令 → reject（调用方按「不可用」处理）。
- *  native 不可用（普通浏览器、Windows/Linux 没打包对应 .dylib）时，调用会失败——
- * 这正是「原生能力不在、该回落」的信号，别吞。
+ * **优先走宿主包装的 `window.otools/utools.invokeNative`**（gif 等原生插件正是这么
+ * 调的：包装注入了本插件的 uuid、走的是有权限的通道）。没有包装再退回 Tauri 原生 IPC
+ * 直连 `native_plugin_invoke`——直连在某些 webview 的权限模型下可能被拒，所以包装优先。
+ *
+ * 插件返回 `{ok:false,error}` / 原生库不在（普通浏览器、Windows/Linux 没打包对应
+ * .dylib）/ 宿主没这条命令，一律 reject——这正是「原生不可用、该回落」的信号，别吞。
  */
 export async function invokeNative(method, payload = {}, uuid = 'otools-video') {
-  const res = await invokeRaw('native_plugin_invoke', { uuid, method, payload });
+  let res;
+  const w = nativeWrapper();
+  if (w) {
+    // 包装通道：把 {method,payload} 递给本插件的原生 cdylib。
+    res = await w.invokeNative(method, payload);
+  } else {
+    res = await invokeRaw('native_plugin_invoke', { uuid, method, payload });
+  }
   if (res && typeof res === 'object' && res.ok === false) {
     throw new Error(String(res.error || 'native 调用失败'));
   }
-  return res && typeof res === 'object' && 'data' in res ? res.data : res;
+  return res && typeof res === 'object' && 'ok' in res && 'data' in res ? res.data : res;
 }
 
 /** 走哪条通道：'wrapper' | 'raw' | 'none'。 */
