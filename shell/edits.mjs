@@ -537,6 +537,48 @@ export function currentExportParams() {
     why: '出错时清掉阶段，免得下一次读到过期的值（视频与音频两条路径的 catch 都要清）',
   },
 
+  /* ===================== 原生 H.264 快路径：浏览器 H.264 不给力，上宿主硬件编码 ===================== */
+  // 诊断坐实：WKWebView 的 WebCodecs H.264 在真实分辨率会把 H.264 编到一半静默挂死
+  // （isConfigSupported 说支持、实际 0 帧）。VP9 能编但慢。所以 H.264/MP4 在「宿主可用
+  // 且 macOS 且 ffmpeg 带 h264_videotoolbox」时，改走宿主硬件编码：逐帧渲染成 JPEG 落盘，
+  // 交 native/ 这个 cdylib 里的 ffmpeg 编成 H.264/MP4。任一条件不满足就继续走下面原有的
+  // WebCodecs/mediabunny 管线（VP9/WebM 在浏览器里可靠），行为与从前完全一致。
+  {
+    file: 'src/engine/exporter.js',
+    find: "import { framePosition, needsBetween, FRAME_SNAP } from '../model/slow-motion.js';\n",
+    replace: "import { framePosition, needsBetween, FRAME_SNAP } from '../model/slow-motion.js';\nimport { nativeH264Available, exportVideoNativeH264 } from '../otools/native-encoder.js';\n",
+    expect: 1,
+    why: '原生 H.264 快路径：导入移植层的原生编码入口',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: `  const total = frameCount(duration, fps);
+  exportStage = '检测编码能力';`,
+    replace: `  const total = frameCount(duration, fps);
+  exportParams = { codec: s.codec, width, height, fps, bitrate, hardware: false };
+  exportStage = '';
+  // 【原生 H.264 快路径】H.264/MP4 且宿主可用（macOS + ffmpeg 带 h264_videotoolbox）时，
+  // 不走浏览器 WebCodecs——它在部分 WKWebView（实测 1080p）把 H.264 编到一半静默挂死。
+  // 改走宿主硬件编码：逐帧渲染成 JPEG 落盘，交 ffmpeg 编 H.264/MP4（video-only MVP）。
+  // 任一条件不满足就继续走下面的 WebCodecs 管线（VP9/WebM 在浏览器里可靠）。
+  if (s.video && !s.gif && s.codec === 'avc' && s.format === 'mp4' && (await nativeH264Available())) {
+    exportStage = '原生编码（ffmpeg）';
+    const nativeRenderer = new FrameRenderer(project, library, width, height);
+    try {
+      return await exportVideoNativeH264({
+        width, height, fps, bitrate, total, duration, name: base,
+        signal, onProgress,
+        renderFrame: async (i) => { await nativeRenderer.render(frameTime(i, fps)); return nativeRenderer.canvas; },
+      });
+    } finally {
+      await nativeRenderer?.dispose?.().catch(() => {});
+    }
+  }
+  exportStage = '检测编码能力';`,
+    expect: 1,
+    why: '原生 H.264 快路径：H.264/MP4 + 宿主可用时走 ffmpeg 硬件编码，否则回落 WebCodecs',
+  },
+
   /* ===== 导出卡 0% 看门狗：编码无进度时给出明确报错，而不是永远停在 0% ===== */
   {
     file: 'src/ui/export-dialog.js',

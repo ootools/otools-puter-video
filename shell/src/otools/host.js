@@ -174,6 +174,23 @@ function invokeRaw(command, payload) {
   return invoke(command, payload);
 }
 
+/**
+ * 调用本插件自带的原生 cdylib 方法（宿主 native_plugin_invoke）。
+ *
+ * 宿主会把插件返回的 {ok:false,error} 转成 Err 抛回来，所以这里：
+ *   - 成功 → 解析出的 {ok:true,data}，取出并返回 data；
+ *   - 插件报错 / 原生库不在 / 宿主没这条命令 → reject（调用方按「不可用」处理）。
+ *  native 不可用（普通浏览器、Windows/Linux 没打包对应 .dylib）时，调用会失败——
+ * 这正是「原生能力不在、该回落」的信号，别吞。
+ */
+export async function invokeNative(method, payload = {}, uuid = 'otools-video') {
+  const res = await invokeRaw('native_plugin_invoke', { uuid, method, payload });
+  if (res && typeof res === 'object' && res.ok === false) {
+    throw new Error(String(res.error || 'native 调用失败'));
+  }
+  return res && typeof res === 'object' && 'data' in res ? res.data : res;
+}
+
 /** 走哪条通道：'wrapper' | 'raw' | 'none'。 */
 export function channel() {
   if (wrapper()) return 'wrapper';
@@ -441,6 +458,7 @@ export function install() {
     bytesToBase64,
     base64ToBytes,
     base64ToBlob,
+    invokeNative,
     errorMessage,
     diag,
   };
