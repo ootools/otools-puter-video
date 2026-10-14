@@ -1,0 +1,31 @@
+{
+  "devUrl": "http://127.0.0.1:5517",
+  "developerName": "jry",
+  "displayName": "Video Studio",
+  "displayNameCN": "视频剪辑",
+  "entry": "dist/index.html",
+  "quickDev": true,
+  "hasAd": false,
+  "icon": "🎬",
+  "inPluginPurchase": false,
+  "key": [
+    "video",
+    "video-studio",
+    "editor",
+    "剪辑",
+    "视频编辑",
+    "时间线",
+    "字幕",
+    "特效",
+    "转场",
+    "调色",
+    "导出视频",
+    "capcut"
+  ],
+  "openInBrowser": false,
+  "packid": "otools-video",
+  "screenshots": [],
+  "summary": "Video Studio（HeyPuter/everything 的多轨视频剪辑器）的 OTools 插件版：时间线剪辑、字幕、特效、转场、调色、关键帧与硬件加速导出。工程与素材是本机目录里的普通文件，不走任何云账号。",
+  "uuid": "otools-video",
+  "version": "0.1.0"
+}

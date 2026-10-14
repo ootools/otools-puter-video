@@ -1,0 +1,248 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { Library, AutoSaver } from '../src/storage/library.js';
+import { memoryBackend } from '../src/storage/backends.js';
+import { EditorStore } from '../src/model/store.js';
+import { createProject } from '../src/model/project.js';
+
+// Media probing needs real decoders; these tests only need its answers.
+vi.mock('../src/media/probe.js', async (importOriginal) => ({
+  ...(await importOriginal()),
+  probe: vi.fn(async (file) => {
+    if (!/\.(mp4|mp3|png)$/.test(file.name)) throw new Error(`${file.name} is not a video, audio or image file.`);
+    return { kind: file.name.endsWith('.mp3') ? 'audio' : file.name.endsWith('.png') ? 'image' : 'video', duration: 2_000_000, width: 640, height: 360, fps: 30, hasAudio: true, hasVideo: true };
+  }),
+}));
+
+const json = (backend, path) => JSON.parse(backend.files.get(path));
+const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => {});
+
+describe('Library projects', () => {
+  let backend;
+  let lib;
+  beforeEach(() => {
+    backend = memoryBackend();
+    lib = new Library(backend);
+  });
+
+  it('creates projects and lists them newest first', async () => {
+    const a = await lib.createProject({ name: 'First' });
+    const b = await lib.createProject({ name: 'Second', ratio: '9:16' });
+    b.modified = a.modified + 10;
+    await lib.saveProject(b);
+    const list = await lib.listProjects();
+    expect(list.map((p) => p.name)).toEqual(['Second', 'First']);
+    expect(list[0]).toMatchObject({ id: b.id, ratio: '9:16', width: 1080, height: 1920, duration: 0 });
+    expect(json(backend, `projects/${a.id}.json`).name).toBe('First');
+  });
+
+  it('opens a saved project as a normalized copy', async () => {
+    const p = await lib.createProject({ name: 'Open me' });
+    const opened = await lib.openProject(p.id);
+    expect(opened).toEqual(p);
+    expect(opened).not.toBe(p);
+  });
+
+  it('explains when a project file is missing', async () => {
+    await expect(lib.openProject('nope')).rejects.toThrow(/could not be found/);
+  });
+
+  it('renames a project in its file and in the index', async () => {
+    const p = await lib.createProject({ name: 'Old' });
+    await lib.renameProject(p.id, 'New');
+    expect(json(backend, `projects/${p.id}.json`).name).toBe('New');
+    expect((await lib.listProjects()).map((x) => x.name)).toEqual(['New']);
+  });
+
+  it('duplicates a project with a new id, a copy name and its cover', async () => {
+    const p = await lib.createProject({ name: 'Trip' });
+    await lib.saveCover(p.id, 'jpeg-bytes');
+    const copy = await lib.duplicateProject(p.id);
+    expect(copy.id).not.toBe(p.id);
+    expect(copy.name).toBe('Trip copy');
+    expect(backend.files.get(`covers/${copy.id}.jpg`)).toBe('jpeg-bytes');
+    expect((await lib.listProjects()).map((x) => x.id).sort()).toEqual([p.id, copy.id].sort());
+  });
+
+  it('deletes the project file, its cover and its index entry', async () => {
+    const keep = await lib.createProject({ name: 'Keep' });
+    const gone = await lib.createProject({ name: 'Gone' });
+    await lib.saveCover(gone.id, 'x');
+    const events = [];
+    lib.on('index', (list) => events.push(list.length));
+    await lib.deleteProject(gone.id);
+    expect(backend.files.has(`projects/${gone.id}.json`)).toBe(false);
+    expect(backend.files.has(`covers/${gone.id}.jpg`)).toBe(false);
+    expect((await lib.listProjects()).map((x) => x.id)).toEqual([keep.id]);
+    expect(events).toEqual([1]);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['corrupt', '{"oops'],
+    ['not a list', '{"a":1}'],
+  ])('rebuilds the index from the project files when it is %s', async (_, content) => {
+    const p = await lib.createProject({ name: 'Survivor' });
+    backend.files.set('projects/broken.json', 'not json');
+    backend.files.set('projects/readme.txt', 'ignored');
+    if (content === undefined) backend.files.delete('index.json');
+    else backend.files.set('index.json', content);
+    const fresh = new Library(backend);
+    const list = await fresh.listProjects();
+    expect(list.map((x) => x.id)).toEqual([p.id]);
+    expect(json(backend, 'index.json').map((x) => x.id)).toEqual([p.id]);
+  });
+
+  it('keeps the file name as the project id, so a rebuilt index opens the right file', async () => {
+    backend.files.set('projects/abc.json', JSON.stringify({ format: 'video-studio-project', name: 'No id' }));
+    backend.files.set('projects/def.json', JSON.stringify({ format: 'video-studio-project', id: 'other', name: 'Wrong id' }));
+    const list = await lib.listProjects();
+    expect(list.map((x) => x.id).sort()).toEqual(['abc', 'def']);
+    expect((await lib.openProject('abc')).id).toBe('abc');
+    expect((await lib.openProject('def')).id).toBe('def');
+  });
+});
+
+describe('Library media', () => {
+  it('imports a file, stores it once by content and serves it back', async () => {
+    const backend = memoryBackend();
+    const lib = new Library(backend);
+    const file = new File([new Uint8Array([1, 2, 3])], 'Clip.MP4'.toLowerCase(), { type: 'video/mp4' });
+    const asset = await lib.importFile(file);
+    expect(asset).toMatchObject({ kind: 'video', name: 'clip.mp4', ext: 'mp4', duration: 2_000_000, width: 640 });
+    expect(asset.hash).toMatch(/^[0-9a-f]{64}$/);
+    await lib.flushUploads();
+    expect(backend.files.has(`media/${asset.hash}.mp4`)).toBe(true);
+    const writes = backend.writes;
+    const again = await lib.importFile(file);
+    await lib.flushUploads();
+    expect(again.hash).toBe(asset.hash);
+    expect(backend.writes).toBe(writes);
+    expect(await lib.mediaBlob(asset)).toBe(file);
+  });
+
+  it('rejects files that are not media', async () => {
+    const lib = new Library(memoryBackend());
+    await expect(lib.importFile(new File(['hi'], 'notes.txt'))).rejects.toThrow(/not a video/);
+  });
+
+  it('reports a failed upload and lets it be retried', async () => {
+    quiet();
+    const backend = memoryBackend();
+    const lib = new Library(backend);
+    const states = [];
+    lib.on('uploads', (e) => states.push(e));
+    backend.failNext = 2; // the media listing and the write
+    const asset = await lib.importFile(new File(['a'], 'a.mp3', { type: 'audio/mpeg' }));
+    await lib.flushUploads();
+    expect(states.at(-1)).toMatchObject({ pending: 0, error: expect.any(Error) });
+    expect(backend.files.has(`media/${asset.hash}.mp3`)).toBe(false);
+    lib._store(asset, lib.blobs.get(asset.hash));
+    await lib.flushUploads();
+    expect(backend.files.has(`media/${asset.hash}.mp3`)).toBe(true);
+  });
+
+  it('reads media from storage when it is not in memory and explains a missing file', async () => {
+    const backend = memoryBackend();
+    const lib = new Library(backend);
+    const blob = new Blob(['data']);
+    backend.files.set('media/h1.mp4', blob);
+    const fromStore = await lib.mediaBlob({ hash: 'h1', ext: 'mp4', name: 'A', mime: 'video/mp4' });
+    expect(fromStore.type).toBe('video/mp4');
+    await expect(lib.mediaBlob({ hash: 'h2', ext: 'mp4', name: 'Lost clip' })).rejects.toThrow('Media file missing: Lost clip');
+    const url = await lib.mediaURL({ hash: 'h1', ext: 'mp4', name: 'A' });
+    expect(await lib.mediaURL({ hash: 'h1', ext: 'mp4', name: 'A' })).toBe(url);
+  });
+});
+
+describe('AutoSaver', () => {
+  let backend;
+  let lib;
+  let store;
+  let saver;
+  let statuses;
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    backend = memoryBackend();
+    lib = new Library(backend);
+    const project = createProject({ name: 'Auto' });
+    await lib.saveProject(project);
+    store = new EditorStore(project);
+    saver = new AutoSaver(lib, store, { delay: 1000 });
+    statuses = [];
+    saver.on('status', (e) => statuses.push(e.status));
+  });
+
+  afterEach(() => {
+    saver.dispose();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  const edit = (name) => store.update('Rename', (p) => { p.name = name; }, { structural: false });
+  const saved = () => json(backend, `projects/${store.project.id}.json`).name;
+
+  it('waits for a pause in editing and then saves once', async () => {
+    const writes = backend.writes;
+    edit('a');
+    await vi.advanceTimersByTimeAsync(600);
+    edit('b');
+    await vi.advanceTimersByTimeAsync(600);
+    edit('c');
+    expect(backend.writes).toBe(writes);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(saved()).toBe('c');
+    expect(backend.writes - writes).toBe(2); // project file and index
+    expect(store.dirty).toBe(false);
+    expect(statuses).toEqual(['pending', 'pending', 'pending', 'saving', 'saved']);
+  });
+
+  it('shows an error and retries after a failed save', async () => {
+    quiet();
+    backend.failNext = 1;
+    edit('retry me');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(saver.status).toBe('error');
+    expect(store.dirty).toBe(true);
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(saver.status).toBe('saved');
+    expect(saved()).toBe('retry me');
+    expect(store.dirty).toBe(false);
+  });
+
+  it('saves again when edits arrive while a save is running', async () => {
+    edit('first');
+    await vi.advanceTimersByTimeAsync(1000);
+    // Slow the next write down so an edit lands mid-save.
+    const write = backend.writeJSON;
+    backend.writeJSON = async (...args) => {
+      await new Promise((r) => setTimeout(r, 500));
+      return write(...args);
+    };
+    edit('second');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(saver.status).toBe('saving');
+    edit('third');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(saved()).toBe('third');
+    expect(store.dirty).toBe(false);
+    expect(saver.status).toBe('saved');
+  });
+
+  it('flush() saves right away and is a no-op when nothing changed', async () => {
+    edit('now');
+    await saver.flush();
+    expect(saved()).toBe('now');
+    const writes = backend.writes;
+    await saver.flush();
+    expect(backend.writes).toBe(writes);
+  });
+
+  it('stops listening after dispose()', async () => {
+    saver.dispose();
+    const writes = backend.writes;
+    edit('ignored');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(backend.writes).toBe(writes);
+  });
+});

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Video Studio</title>
+  <meta name="description" content="A multi-track video editor: trim, split, add text, effects, transitions, filters, keyframes and captions, then export. Projects are plain files in a folder on this computer." />
+  <meta name="theme-color" content="#f4f4f5" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#121212" media="(prefers-color-scheme: dark)" />
+  <meta name="color-scheme" content="light dark" />
+  <link rel="icon" href="./favicon.ico" sizes="16x16 32x32 48x48" />
+  <link rel="icon" href="./favicon-16x16.png" type="image/png" sizes="16x16" />
+  <link rel="icon" href="./favicon-32x32.png" type="image/png" sizes="32x32" />
+  <link rel="icon" href="./favicon-48x48.png" type="image/png" sizes="48x48" />
+  <link rel="apple-touch-icon" href="./apple-touch-icon.png" sizes="180x180" />
+  <link rel="manifest" href="./manifest.json" />
+  <script>
+    // OTools 插件版：**不再加载 https://js.puter.com/v2/**。
+    // ------------------------------------------------------------------
+    // 上游是「Puter 应用」：靠那个脚本注入 window.puter，再拿 puter.fs 当工程存储、
+    // puter.ai 当 AI、puter.auth 当账号。本插件把这些全部去掉（见 README「与上游的差异」），
+    // 所以这个页面里 `typeof puter === 'undefined'` 恒成立——上游自己就有「离线/被墙时
+    // 退回本地」的分支，AI 与云端入口会各自隐藏，不需要额外改上游代码。
+    //
+    // 工程存储改由 shell/src/otools/backend.js 接到 OTools 宿主的本地磁盘上。
+    (() => {
+      // 主题：用户没选过就跟 OTools 的界面主题（宿主的 init script 已经把
+      // dark/light 类打在 documentElement 上，且早于本页任何脚本执行）。
+      // 选定一次就写进 localStorage，之后由界面里的 Theme 菜单说了算。
+      let t = null;
+      try { t = localStorage.getItem('video-studio:theme'); } catch {}
+      if (!t) {
+        const cl = document.documentElement.classList;
+        t = cl.contains('dark') ? 'dark' : cl.contains('light') ? 'light' : 'system';
+        try { localStorage.setItem('video-studio:theme', t); } catch {}
+      }
+      const dark = t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+      const root = document.documentElement;
+      root.dataset.theme = t;
+      root.dataset.themeResolved = dark ? 'dark' : 'light';
+    })();
+  </script>
+  <script type="module" src="/src/main.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to editor</a>
+  <div id="app" class="app" aria-busy="true"></div>
+  <div id="live-region" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+</body>
+</html>

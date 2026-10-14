@@ -1,0 +1,149 @@
+/**
+ * Media housekeeping: remove media no clip uses, find media whose file is
+ * missing and point it at a new file, swap an asset's file everywhere it is
+ * used, and show where an asset is on the timeline.
+ */
+import { h, announce } from '../lib/dom.js';
+import { icon } from '../lib/icons.js';
+import * as T from '../model/timeline.js';
+import { allClipsDeep } from '../model/compound.js';
+import { openDialog, confirmDialog, toast } from './dialog.js';
+
+/** Assets no clip refers to (directly, or through a reversed copy in use). */
+export function unusedAssets(project) {
+  const used = new Set();
+  for (const c of allClipsDeep(project)) if (c.assetId) used.add(c.assetId);
+  // A reversed copy keeps its original alive, and the other way round.
+  for (const a of Object.values(project.assets)) {
+    if (a.reversedOf && (used.has(a.id) || used.has(a.reversedOf))) {
+      used.add(a.id);
+      used.add(a.reversedOf);
+    }
+  }
+  return Object.values(project.assets).filter((a) => !used.has(a.id));
+}
+
+/** Point every clip using oldId at a new asset and drop the old one. */
+export function swapAsset(project, oldId, asset) {
+  const old = project.assets[oldId];
+  project.assets[asset.id] = { ...asset, ...(old?.folder ? { folder: old.folder } : {}) };
+  let n = 0;
+  for (const c of allClipsDeep(project)) {
+    if (c.assetId === oldId) {
+      c.assetId = asset.id;
+      if (c.name === old?.name) c.name = asset.name;
+      n++;
+    }
+  }
+  if (oldId !== asset.id) delete project.assets[oldId];
+  return n;
+}
+
+function pickFile(accept) {
+  return new Promise((resolve) => {
+    const input = h('input', { type: 'file', accept, hidden: true });
+    input.addEventListener('change', () => {
+      resolve(input.files?.[0] || null);
+      input.remove();
+    });
+    input.addEventListener('cancel', () => {
+      resolve(null);
+      input.remove();
+    });
+    document.body.append(input);
+    input.click();
+  });
+}
+
+const ACCEPT = { video: 'video/*,.mkv,.mov,.m4v,.webm', audio: 'audio/*,.mp3,.wav,.m4a,.flac,.ogg,.opus', image: 'image/*' };
+
+export function createMediaActions(ctx) {
+  const { store } = ctx;
+  const a = {
+    async removeUnusedMedia() {
+      const list = unusedAssets(store.project);
+      if (!list.length) {
+        toast('Every item in the media library is used on the timeline.', { kind: 'info' });
+        return 0;
+      }
+      const ok = await confirmDialog({ title: 'Remove unused media?', message: `${list.length} item${list.length === 1 ? '' : 's'} not used on the timeline will be removed from this project's media library.`, confirm: 'Remove', danger: true });
+      if (!ok) return 0;
+      store.update('Remove unused media', (p) => {
+        for (const x of list) delete p.assets[x.id];
+      }, { structural: false });
+      announce(`${list.length} unused items removed`);
+      return list.length;
+    },
+
+    /** Select every clip using an asset and jump to the first. */
+    revealAsset(assetId) {
+      const clips = T.allClips(store.project).filter((c) => c.assetId === assetId).sort((x, y) => x.start - y.start);
+      if (!clips.length) {
+        toast('This item is not on the timeline.', { kind: 'info' });
+        return;
+      }
+      store.select(clips.map((c) => c.id));
+      store.seek(clips[0].start);
+      announce(`${clips.length} clip${clips.length === 1 ? '' : 's'} selected`);
+    },
+
+    /** Choose a new file for an asset; every clip using it switches over. */
+    async replaceAssetFile(assetId) {
+      const old = store.project.assets[assetId];
+      if (!old) return null;
+      const file = await pickFile(ACCEPT[old.kind] || '');
+      if (!file) return null;
+      let asset;
+      try {
+        asset = await ctx.library.importFile(file);
+      } catch (err) {
+        toast(err?.message || `Couldn't open ${file.name}`, { kind: 'error' });
+        return null;
+      }
+      if (asset.kind !== old.kind && !(old.kind === 'video' && asset.kind === 'image')) {
+        toast(`${file.name} is ${asset.kind === 'audio' ? 'an audio file' : asset.kind === 'image' ? 'a photo' : 'a video'}, not ${old.kind === 'audio' ? 'audio' : old.kind === 'image' ? 'a photo' : 'a video'}.`, { kind: 'error' });
+        return null;
+      }
+      let n = 0;
+      store.update('Replace media file', (p) => {
+        n = swapAsset(p, assetId, asset);
+      });
+      if (asset.duration && old.duration && asset.duration < old.duration) toast('The new file is shorter, so some clips may now run past its end.', { kind: 'info' });
+      announce(`${n} clip${n === 1 ? '' : 's'} now use ${asset.name}`);
+      return asset;
+    },
+
+    /** Check every asset's file and offer to relink the missing ones. */
+    async findMissingMedia() {
+      const missing = [];
+      for (const x of Object.values(store.project.assets)) {
+        try {
+          await ctx.library.mediaBlob(x);
+        } catch {
+          missing.push(x);
+        }
+      }
+      if (!missing.length) {
+        toast('All media files are present.', { kind: 'success' });
+        return [];
+      }
+      const rows = missing.map((x) => {
+        const btn = h('button.btn.small', { type: 'button' }, icon('folderOpen', 14), 'Choose file...');
+        const row = h('li.missing-row', icon(x.kind === 'audio' ? 'music' : x.kind === 'image' ? 'image' : 'film', 16), h('span.missing-name', x.name), btn);
+        btn.addEventListener('click', async () => {
+          const made = await a.replaceAssetFile(x.id);
+          if (made) {
+            row.classList.add('fixed');
+            btn.replaceWith(h('span.missing-ok', icon('check', 14), 'Relinked'));
+          }
+        });
+        return row;
+      });
+      const done = h('button.btn.primary', { type: 'button' }, 'Done');
+      const d = openDialog({ title: 'Missing media', body: h('div', h('p.dialog-text', `${missing.length} file${missing.length === 1 ? ' is' : 's are'} missing. Choose a file for each to put it back on the timeline.`), h('ul.missing-list', rows)), actions: [done], className: 'small' });
+      done.addEventListener('click', () => d.close());
+      return missing;
+    },
+  };
+  return a;
+}

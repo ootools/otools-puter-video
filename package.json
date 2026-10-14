@@ -1,0 +1,46 @@
+{
+  "name": "otools-video",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Video Studio (HeyPuter/everything) as an OTools plugin: the same multi-track editor, with projects and media stored as plain files on this computer instead of in a Puter cloud account.",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "sync-upstream": "node scripts/sync-upstream.mjs",
+    "check-upstream": "node scripts/sync-upstream.mjs --check",
+    "tree": "node scripts/build.mjs --tree",
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/dev.mjs",
+    "test": "node scripts/test.mjs",
+    "preview": "node scripts/serve-dist.mjs",
+    "pack": "node scripts/pack-plugin.mjs",
+    "verify": "node scripts/verify-plugin.mjs",
+    "release": "node scripts/build.mjs && node scripts/pack-plugin.mjs && node scripts/verify-plugin.mjs"
+  },
+  "dependencies": {
+    "@fontsource/anton": "5.3.0",
+    "@fontsource/bebas-neue": "5.3.0",
+    "@fontsource/dancing-script": "5.3.0",
+    "@fontsource/inter": "5.3.0",
+    "@fontsource/lobster": "5.3.0",
+    "@fontsource/merriweather": "5.3.0",
+    "@fontsource/montserrat": "5.3.0",
+    "@fontsource/oswald": "5.3.0",
+    "@fontsource/pacifico": "5.3.0",
+    "@fontsource/permanent-marker": "5.3.0",
+    "@fontsource/playfair-display": "5.3.0",
+    "@fontsource/poppins": "5.3.0",
+    "@fontsource/roboto-mono": "5.3.0",
+    "@mediapipe/tasks-vision": "1.0.1",
+    "lucide": "1.54.0",
+    "mediabunny": "1.61.3"
+  },
+  "devDependencies": {
+    "axe-core": "4.14.0",
+    "jsdom": "30.1.2",
+    "vite": "8.3.4",
+    "vitest": "5.0.3"
+  }
+}
