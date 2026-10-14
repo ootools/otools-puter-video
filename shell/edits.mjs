@@ -418,6 +418,112 @@ const canSaveLocally = () => hostReady();`,
     why: '默认导出格式改成 VP9 后，这条体积估算断言仍应按它原本假设的 H.264 计算',
   },
 
+  // 诊断：导出卡住时要把「当前停在哪一步」读出来（exporter.js 里记的阶段面包屑）——
+  // 给 export-dialog.js 的这个 import 补上 currentExportStage。
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "  describeError, formatBytes, safeFileName, renderFrames,\n} from '../engine/exporter.js';",
+    replace: "  describeError, formatBytes, safeFileName, renderFrames, currentExportStage,\n} from '../engine/exporter.js';",
+    expect: 1,
+    why: '诊断：从 exporter.js 导入 currentExportStage，卡住时报出停在哪个阶段',
+  },
+  // 诊断：裸 WebCodecs 编码能力探测（移植层自己的模块，构建时随 shell/src/ 进入 .build/）。
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos } from '../otools/ui.js';",
+    replace: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos } from '../otools/ui.js';\nimport { probeCodecs, summarizeProbes } from '../otools/codec-probe.js';",
+    expect: 1,
+    why: '诊断：导入裸 WebCodecs 探测，卡住时告诉用户到底哪个编码真出不了帧',
+  },
+
+  /* ============================ 导出卡住时说清「停在哪一步」 ============================ */
+  // 「编码卡住」是个太笼统的说法：同一副样子背后可能是编码能力检测、输出启动、
+  // 字体/LUT/抠图模型加载、逐帧渲染、逐帧编码、收尾封装中的任何一步挂住。
+  // 在 exporter.js 里记下当前阶段，卡住时报给用户，省得靠猜。
+  {
+    file: 'src/engine/exporter.js',
+    find: "/** Output pixel size: project aspect, short side = resolution, even dimensions. */",
+    replace: `/** 当前导出停在哪一步（诊断用；卡住时报给用户，也不写进任何产物）。 */
+let exportStage = '';
+export function currentExportStage() {
+  return exportStage;
+}
+
+/** Output pixel size: project aspect, short side = resolution, even dimensions. */`,
+    expect: 1,
+    why: '导出卡住时要能说出停在哪一步',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "  const supported = await canEncodeVideo(s.codec, { width, height, bitrate, frameRate: fps }).catch(() => false);",
+    replace: "  exportStage = '检测编码能力';\n  const supported = await canEncodeVideo(s.codec, { width, height, bitrate, frameRate: fps }).catch(() => false);",
+    expect: 1,
+    why: '导出卡住时说清停在哪一步：编码能力检测',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "  const sink = await openTarget(estimated, forceTarget);",
+    replace: "  exportStage = '打开输出目标';\n  const sink = await openTarget(estimated, forceTarget);",
+    expect: 1,
+    why: '导出卡住时说清停在哪一步：打开输出目标',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "    output.setMetadataTags({ title: s.name || project.name, date: new Date() });\n    await output.start();",
+    replace: "    output.setMetadataTags({ title: s.name || project.name, date: new Date() });\n    exportStage = '启动输出（建编码器）';\n    await output.start();",
+    expect: 2,
+    why: '导出卡住时说清停在哪一步：output.start()（视频与音频两条导出路径都有这一步）',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "    await preloadFonts(project);",
+    replace: "    exportStage = '加载字体';\n    await preloadFonts(project);",
+    expect: 1,
+    why: '导出卡住时说清停在哪一步：字体',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "    await ensureLuts(project, library).catch(() => {});",
+    replace: "    exportStage = '加载 LUT';\n    await ensureLuts(project, library).catch(() => {});",
+    expect: 1,
+    why: '导出卡住时说清停在哪一步：LUT',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "    await ensureCutout(project);",
+    replace: "    exportStage = '加载人像抠图模型';\n    await ensureCutout(project);",
+    expect: 1,
+    why: '导出卡住时说清停在哪一步：抠图模型（MediaPipe WASM，最容易在这一步静默挂住）',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "      await renderer.render(t);",
+    replace: "      exportStage = `渲染第 ${i + 1} / ${total} 帧`;\n      await renderer.render(t);",
+    expect: 1,
+    why: '导出卡住时说清停在哪一步：逐帧渲染',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "      await videoSource.add(i / fps, 1 / fps);",
+    replace: "      exportStage = `编码第 ${i + 1} / ${total} 帧`;\n      await videoSource.add(i / fps, 1 / fps);",
+    expect: 1,
+    why: '导出卡住时说清停在哪一步：逐帧编码',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "    await pumpAudio(Infinity);",
+    replace: "    exportStage = '收尾混音与封装';\n    await pumpAudio(Infinity);",
+    expect: 1,
+    why: '导出卡住时说清停在哪一步：收尾',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "  } catch (err) {\n    if (output.state !== 'finalized' && output.state !== 'canceled') await output.cancel().catch(() => {});",
+    replace: "  } catch (err) {\n    exportStage = '';\n    if (output.state !== 'finalized' && output.state !== 'canceled') await output.cancel().catch(() => {});",
+    expect: 2,
+    why: '出错时清掉阶段，免得下一次读到过期的值（视频与音频两条路径的 catch 都要清）',
+  },
+
   /* ===== 导出卡 0% 看门狗：编码无进度时给出明确报错，而不是永远停在 0% ===== */
   {
     file: 'src/ui/export-dialog.js',
@@ -499,10 +605,39 @@ const canSaveLocally = () => hostReady();`,
   },
   {
     file: 'src/ui/export-dialog.js',
-    find: "  function fail(err) {\n    state = 'error';\n    titleEl.textContent = 'Export failed';\n    const msg = describeError(err, s);",
-    replace: "  function fail(err) {\n    state = 'error';\n    titleEl.textContent = 'Export failed';\n    const msg = typeof err === 'string' ? err : describeError(err, s);",
+    find: `  function fail(err) {
+    state = 'error';
+    titleEl.textContent = 'Export failed';
+    const msg = describeError(err, s);
+    body.replaceChildren(h('div.export-message', { role: 'alert' }, icon('alert', 28), h('p', msg)));
+    const back = h('button.btn', { type: 'button' }, 'Back to settings');
+    back.addEventListener('click', backToSettings);
+    const close = h('button.btn.primary', { type: 'button' }, 'Close');
+    close.addEventListener('click', () => dlg.close());
+    footerInfo.replaceChildren();
+    footerButtons.replaceChildren(back, close);
+    back.focus();
+  }`,
+    replace: `  function fail(err) {
+    state = 'error';
+    titleEl.textContent = 'Export failed';
+    // err 可能是 Error（交给 describeError 翻译）、字符串（已经翻好的中文报错），
+    // 或 DOM 节点（多段报错，比如「卡在哪一步」＋后台探测结论）。统一成一个消息节点，
+    // 再把它返回——调用方可握着这个引用，在后续（编码探测）拿到结果后**就地更新文案**。
+    const msg = typeof err === 'string' || err?.nodeType ? err : describeError(err, s);
+    const msgEl = typeof msg === 'string' ? h('p', msg) : msg;
+    body.replaceChildren(h('div.export-message', { role: 'alert' }, icon('alert', 28), msgEl));
+    const back = h('button.btn', { type: 'button' }, 'Back to settings');
+    back.addEventListener('click', backToSettings);
+    const close = h('button.btn.primary', { type: 'button' }, 'Close');
+    close.addEventListener('click', () => dlg.close());
+    footerInfo.replaceChildren();
+    footerButtons.replaceChildren(back, close);
+    back.focus();
+    return msgEl;
+  }`,
     expect: 1,
-    why: '导出卡 0% 看门狗：fail 支持直接传已翻译好的中文报错',
+    why: '诊断：fail 支持直接传字符串/DOM 节点，并返回消息节点（供编码探测就地更新文案）',
   },
   {
     file: 'src/ui/export-dialog.js',
@@ -518,14 +653,27 @@ const canSaveLocally = () => hostReady();`,
       if (err?.code === 'encoder-stalled') {
         console.error('Export stalled: no encode progress within timeout');
         if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
-        // 不偷偷换格式——用户选了什么就是什么。但要把「该改哪一项」说清楚：
-        // H.264 / HEVC 走系统（硬件）编码器，某些 webview 里会静默挂起；
-        // VP9 是软件编码，是这种情况下唯一大概率能跑完的选择。
+        // 不偷偷换格式——用户选了什么就是什么。但要把「卡在哪一步、该改哪一项」说清楚。
         const codecLabel = VIDEO_CODECS.find((c) => c.value === s.codec)?.label || s.codec;
+        const stage = currentExportStage();
         const canTryVp9 = stallKind === 'video' && s.codec !== 'vp9' && (!caps || caps.video.includes('vp9'));
-        fail(canTryVp9
+        const headline = canTryVp9
           ? \`导出卡住：\${codecLabel} 编码在当前环境没有响应（系统编码器在部分环境会静默挂起）。请在导出设置里改用「VP9 / WebM」后重试——VP9 是软件编码，不依赖系统编码器；或降低分辨率、帧率，或改用 GIF 导出。\`
-          : '导出卡住：编码一直没有进度。请尝试降低分辨率或帧率、缩短导出范围，或改用 GIF 导出。');
+          : '导出卡住：编码一直没有进度。请尝试降低分辨率或帧率、缩短导出范围，或改用 GIF 导出。';
+        // 先把明确的报错亮给用户；编码能力用**裸 WebCodecs** 探测确认（绕开渲染、
+        // 绕开 mediabunny，只问浏览器自己能不能真编出几帧），拿到结论后**就地补到报错里**。
+        // 探测在后台跑，不阻塞报错显示。
+        const lines = [h('p', headline)];
+        if (stage) lines.push(h('p', \`卡在「\${stage}」这一步，之后一直没有进度。\`));
+        const detail = h('p', '正在探测各编码能否真正出帧…');
+        lines.push(detail);
+        fail(h('div', ...lines));
+        probeCodecs({ codecs: ['avc', 'vp9'], timeoutMs: 2500 })
+          .then((probes) => {
+            const summary = summarizeProbes(probes);
+            if (summary) detail.textContent = \`编码探测：\${summary}。\`;
+          })
+          .catch(() => {});
         return;
       }
       console.error(err);

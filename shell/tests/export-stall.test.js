@@ -27,6 +27,13 @@ vi.mock('../src/engine/exporter.js', async (orig) => {
   };
 });
 
+// 卡住时的「编码探测」是后台裸 WebCodecs 探测；换成可控假货，好验证探测结论会被
+// **就地补到报错里**（真探测要真的 WebCodecs，行为本身在 codec-probe.test.js 里测）。
+vi.mock('../src/otools/codec-probe.js', () => ({
+  probeCodecs: vi.fn(async () => [{ codec: 'avc', label: 'H.264', supported: true, frames: 0, error: '' }]),
+  summarizeProbes: vi.fn(() => 'H.264 说支持但不出帧'),
+}));
+
 const { openExportDialog } = await import('../src/ui/export-dialog.js');
 const { exportProject, detectCapabilities, DEFAULT_SETTINGS } = await import('../src/engine/exporter.js');
 
@@ -108,6 +115,8 @@ describe('导出卡 0%', () => {
     expect(d.el.textContent).toContain('导出卡住');
     expect(d.el.textContent).toContain('H.264');
     expect(d.el.textContent).toContain('VP9 / WebM');
+    // 诊断：后台探测结论就地补到报错里（多段报错结构渲染成功）。
+    expect(d.el.textContent).toContain('编码探测：H.264 说支持但不出帧');
     d.close();
   });
 
