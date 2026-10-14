@@ -389,6 +389,100 @@ const canSaveLocally = () => hostReady();`,
     why: '文件头注释里的描述',
   },
 
+  /* ===== 导出卡 0% 看门狗：编码无进度时给出明确报错，而不是永远停在 0% ===== */
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "    controller = new AbortController();",
+    replace: `    controller = new AbortController();
+    // 编码看门狗：导出卡在 0% 时（WebCodecs/Mediabunny 在某些 webview 里会静默挂起，
+    // 不抛错也不吐进度），超时后主动 abort 并给出明确报错，而不是永远停在 0%。
+    let lastProgressAt = Date.now();
+    let firstProgressSeen = false;
+    let stallTimer = null;
+    let stallReject = null;
+    let stallPromise = null;`,
+    expect: 1,
+    why: '导出卡 0% 看门狗：声明状态变量',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "        const run = kind === 'gif' ? (o) => exportGif(project, library, s, o) : (o) => exportProject(project, library, s, { kind, ...o });",
+    replace: `        // 每个 job 启动前重置看门狗，并挂一个「无进度超时」定时器。
+        lastProgressAt = Date.now();
+        firstProgressSeen = false;
+        stallPromise = new Promise((_, rej) => { stallReject = rej; });
+        stallTimer = setInterval(() => {
+          const since = Date.now() - lastProgressAt;
+          // 首帧前给模型加载（LUT/人像抠图）留足时间；开始出帧后只要 12s 没进度就判卡死。
+          const limit = firstProgressSeen ? 12000 : 20000;
+          if (since > limit) {
+            clearInterval(stallTimer);
+            if (stallReject) stallReject(Object.assign(new Error('encoder-stalled'), { code: 'encoder-stalled' }));
+          }
+        }, 1000);
+        const run = kind === 'gif' ? (o) => exportGif(project, library, s, o) : (o) => exportProject(project, library, s, { kind, ...o });`,
+    expect: 1,
+    why: '导出卡 0% 看门狗：每个 job 启动定时器',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "        const r = await run({",
+    replace: "        const runP = run({",
+    expect: 1,
+    why: '导出卡 0% 看门狗：把 run 存到变量，便于 race 与吞掉悬挂 rejection',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "            const overall = (j + p.fraction) / jobs.length;",
+    replace: "            const overall = (j + p.fraction) / jobs.length;\n            lastProgressAt = Date.now();\n            firstProgressSeen = true;",
+    expect: 1,
+    why: '导出卡 0% 看门狗：每次进度回调都重置计时',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "        });",
+    replace: "        });\n        const r = await Promise.race([ runP, stallPromise ]);\n        runP.catch(() => {});",
+    expect: 1,
+    why: '导出卡 0% 看门狗：run 与超时 promise 竞速；run 悬挂的 rejection 用 noop 接住',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "        results.push(r);",
+    replace: "        if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }\n        results.push(r);",
+    expect: 1,
+    why: '导出卡 0% 看门狗：正常完成后清掉定时器',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "  function fail(err) {\n    state = 'error';\n    titleEl.textContent = 'Export failed';\n    const msg = describeError(err, s);",
+    replace: "  function fail(err) {\n    state = 'error';\n    titleEl.textContent = 'Export failed';\n    const msg = typeof err === 'string' ? err : describeError(err, s);",
+    expect: 1,
+    why: '导出卡 0% 看门狗：fail 支持直接传已翻译好的中文报错',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "    } catch (err) {\n      if (err?.name === 'AbortError') {\n        if (!dlg.el.isConnected) return;\n        announce('Export canceled');\n        backToSettings();\n        return;\n      }\n      console.error(err);\n      fail(err);\n    }",
+    replace: `    } catch (err) {
+      if (err?.name === 'AbortError') {
+        if (!dlg.el.isConnected) return;
+        announce('Export canceled');
+        if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+        backToSettings();
+        return;
+      }
+      if (err?.code === 'encoder-stalled') {
+        console.error('Export stalled: no encode progress within timeout');
+        fail('视频编码卡住：当前环境可能无法使用 WebCodecs 视频编码。请尝试降低分辨率或帧率，或改用 GIF 导出。');
+        return;
+      }
+      console.error(err);
+      if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+      fail(err);
+    }`,
+    expect: 1,
+    why: '导出卡 0% 看门狗：超时命中时给出明确中文报错；取消/其它错误也清掉定时器',
+  },
+
   /* ======================================================= 去 AI 的文案 */
   // 上游把「AI 可用」定义为「登录了 Puter 且工程存在云盘」（media/tts.js 的
   // aiAvailable）。插件里这个判断恒为假，于是所有 AI 面板都会走到各自的
