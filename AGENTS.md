@@ -34,8 +34,10 @@
   `Denied ID …/node_modules/…?url` 拒掉 `@mediapipe/tasks-vision` 这类包内资源
   （生产构建不走这条路径，只在 dev/test 上炸）。
 - **构建产物不做批量删除**。`scripts/tree.mjs` 是「覆盖式叠加 + 清扫差集」，
-  `vite.config.js` 里 `emptyOutDir: false`，`dist/` 的清理由 `sweepDist()` 按上一次的
-  产物清单做。理由见 `tree.mjs` 顶部的注释；顺带的好处是第二次构建快得多。
+  `vite.config.js` 里 `emptyOutDir: false`，`dist/` 的清理由 `sweepDist()` 做——
+  清单必须来自 **Vite JS API 报回来的「本次产出了什么」**（`collectEmitted()`），
+  **不能**改成「构建之后 dist/ 里有什么」：后者会把上一轮的残留一起记进清单，
+  差集永远为空，旧 chunk 会一轮一轮堆下去（这个坑踩过一次）。
 
 ## 移植层的地图
 

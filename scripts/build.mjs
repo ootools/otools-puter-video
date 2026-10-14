@@ -14,9 +14,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
-import { spawnSync } from 'node:child_process';
+import { build as viteBuild } from 'vite';
 
-import { repoRoot, distDir, prepareTree, sweepDist, viteBin } from './tree.mjs';
+import { repoRoot, distDir, prepareTree, sweepDist, collectEmitted, viteBin } from './tree.mjs';
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -25,31 +25,31 @@ function arg(name, fallback = null) {
 
 const has = (name) => process.argv.includes(`--${name}`);
 
-function main() {
+async function main() {
   const { buildDir } = prepareTree();
   if (has('tree')) {
     console.log(`\n只合成了构建树：${path.relative(repoRoot, buildDir)}`);
     return;
   }
-
-  const vite = viteBin();
-  if (!vite) {
+  if (!viteBin()) {
     console.error('找不到 vite。先在仓库根执行：npm install');
     process.exit(1);
   }
 
-  const args = [vite, 'build'];
-  if (arg('minify') === '0') args.push('--minify', 'false');
-
   console.log('\n$ vite build');
-  const status = spawnSync(process.execPath, args, { cwd: buildDir, stdio: 'inherit' }).status ?? 1;
-  if (status !== 0) {
-    console.error('vite build 失败。');
-    process.exit(status);
-  }
+  // 走 Vite 的 JS API 而不是命令行：返回值里带着本次 emit 出来的每个文件名，
+  // 这正是 sweepDist 需要的「产出清单」（见 tree.mjs 里 sweepDist 的注释）。
+  const emitted = collectEmitted(await viteBuild({
+    root: buildDir,
+    build: arg('minify') === '0' ? { minify: false } : {},
+  }));
 
-  const swept = sweepDist();
-  if (swept.removed) console.log(`dist/ 清扫：删掉 ${swept.removed} 个上一次构建的残留`);
+  const swept = sweepDist(emitted);
+  if (swept.skipped) {
+    console.log(`dist/ 清扫：跳过（${swept.stale ? `有 ${swept.stale} 个残留，超过上限` : '没有产出清单'}）。需要干净产物请手动删掉 dist/。`);
+  } else if (swept.removed) {
+    console.log(`dist/ 清扫：删掉 ${swept.removed} 个上一次构建的残留`);
+  }
 
   // 入口自检：plugin.json 的 entry 必须真的存在，而且必须带着宿主桥的痕迹。
   const entry = path.join(distDir, 'index.html');
@@ -85,7 +85,7 @@ function main() {
 }
 
 try {
-  main();
+  await main();
 } catch (error) {
   console.error(`\n构建失败：${error.message}`);
   process.exit(1);

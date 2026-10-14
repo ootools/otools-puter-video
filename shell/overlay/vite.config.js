@@ -21,8 +21,9 @@ export default defineConfig({
     cssTarget: 'safari16',
     chunkSizeWarningLimit: 900,
     outDir: '../dist',
-    // dist/ 的清扫交给 scripts/tree.mjs 的 sweepDist()：按上一次的产物清单删差集，
-    // 只删几个带哈希的旧 chunk，而不是把整个目录（几百个字体/模型文件）删掉重来。
+    // dist/ 的清扫交给 scripts/tree.mjs 的 sweepDist()：拿 Vite JS API 报回来的
+    // 「本次产出了哪些文件」做差集，只删几个带哈希的旧 chunk，
+    // 而不是把整个目录（几百个字体/模型文件）删掉重来。
     emptyOutDir: false,
     // 产物是插件的一部分，体积直接决定安装包大小；关掉 sourcemap。
     sourcemap: false,

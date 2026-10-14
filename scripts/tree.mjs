@@ -34,8 +34,6 @@ export const distDir = path.join(repoRoot, 'dist');
 
 /** 清扫时一次删太多文件就停下来问人（避免误删整棵树）。 */
 const SWEEP_LIMIT = 40;
-/** dist/ 上一次构建的产物清单（放在构建树里，但不算构建树的产物）。 */
-const DIST_MANIFEST = '.dist-manifest.json';
 
 const log = (...args) => console.log(...args);
 
@@ -199,7 +197,7 @@ export function prepareTree() {
   for (const relative of upstreamFiles) if (!underDrop(relative)) expected.add(relative);
   for (const relative of overlayFiles) expected.add(relative);
   for (const relative of addedFiles) expected.add(`src/${relative}`);
-  const stale = walk(buildDir).filter((relative) => relative !== DIST_MANIFEST && !expected.has(relative));
+  const stale = walk(buildDir).filter((relative) => !expected.has(relative));
   if (stale.length > SWEEP_LIMIT) {
     throw new Error(`构建树里有 ${stale.length} 个不该存在的文件（上限 ${SWEEP_LIMIT}）。\n这通常是上游一次删了很多文件。请手动删掉 .build/ 后重跑。`);
   }
@@ -219,38 +217,51 @@ export function prepareTree() {
  * 构建产物目录的清扫。
  *
  * Vite 的 `emptyOutDir` 会把 dist/ 整个删掉——在 CI 上没问题，但在本地开发时
- * 那是一次几百个文件的批量删除，既慢又危险。改成「按上一次的清单删差集」：
- * 只删掉这次不再产出的文件（通常是几个带哈希的旧 chunk），数量是个位数。
+ * 那是一次几百个文件的批量删除，既慢又危险。所以配置里关掉了它，改在这里按
+ * **「这一次构建真正产出了什么」** 做差集：留在 dist/ 但不在产出清单里的文件删掉。
+ *
+ * 关键在于清单必须来自**构建的输出**（Vite 的 JS API 会把 emit 出来的每个文件
+ * 报回来），而不是来自「构建之后 dist/ 里有什么」——后者会把上一轮的残留一起
+ * 记进清单，于是差集永远为空，旧 chunk 会一轮一轮堆下去。
+ *
+ * @param {Set<string>} emitted 本次构建产出的文件（相对 dist/ 的路径）
  */
-export function sweepDist() {
-  const manifestPath = path.join(buildDir, DIST_MANIFEST);
-  const current = walk(distDir);
-  let removed = 0;
-  if (fs.existsSync(manifestPath)) {
-    let previous = [];
-    try {
-      previous = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    } catch {
-      previous = [];
-    }
-    const now = new Set(current);
-    const stale = (Array.isArray(previous) ? previous : []).filter((relative) => !now.has(relative));
-    if (stale.length > SWEEP_LIMIT) {
-      log(`dist/ 里有 ${stale.length} 个上一次构建的残留（超过 ${SWEEP_LIMIT} 个上限），跳过清扫。需要干净产物请手动删掉 dist/。`);
-    } else {
-      for (const relative of stale) {
-        const target = path.join(distDir, relative);
-        if (fs.existsSync(target)) {
-          fs.rmSync(target, { force: true });
-          removed += 1;
-        }
-      }
-      pruneEmptyDirs(distDir);
+export function sweepDist(emitted) {
+  const keep = emitted instanceof Set ? emitted : new Set(emitted || []);
+  const onDisk = walk(distDir);
+  if (!keep.size) {
+    // 没有产出清单就别动——宁可留几个旧 chunk，也不要误删整个 dist/。
+    return { files: onDisk.length, removed: 0, skipped: true };
+  }
+  const stale = onDisk.filter((relative) => !keep.has(relative));
+  if (stale.length > SWEEP_LIMIT) {
+    return { files: onDisk.length, removed: 0, skipped: true, stale: stale.length };
+  }
+  for (const relative of stale) {
+    const target = path.join(distDir, relative);
+    if (fs.existsSync(target)) fs.rmSync(target, { force: true });
+  }
+  pruneEmptyDirs(distDir);
+  return { files: onDisk.length - stale.length, removed: stale.length };
+}
+
+/**
+ * 从 Vite JS API 的返回值里收集「本次构建产出了哪些文件」（相对 dist/ 的路径）。
+ *
+ * rollup 的 output 里只有打包产物；`public/` 是 vite 自己拷到 dist/ 根下的，
+ * 不在 output 里，所以要另外算上——否则它们会被当成残留删掉。
+ */
+export function collectEmitted(result) {
+  const emitted = new Set();
+  const outputs = Array.isArray(result) ? result : [result];
+  for (const out of outputs) {
+    for (const item of out?.output || []) {
+      if (item && item.fileName) emitted.add(String(item.fileName).split(path.sep).join('/'));
     }
   }
-  fs.mkdirSync(buildDir, { recursive: true });
-  fs.writeFileSync(manifestPath, `${JSON.stringify(current, null, 2)}\n`);
-  return { files: current.length, removed };
+  const publicDir = path.join(buildDir, 'public');
+  if (fs.existsSync(publicDir)) for (const relative of walk(publicDir)) emitted.add(relative);
+  return emitted;
 }
 
 /** 找 Vite 的可执行入口（仓库根 node_modules 里那份）。 */
