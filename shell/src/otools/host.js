@@ -404,13 +404,6 @@ export async function message(text, { title, kind = 'info' } = {}) {
   try { window.alert(text); } catch { /* 忽略 */ }
 }
 
-/** 目录是否可用（用于校验用户选的工程目录）。 */
-export async function isDirectory(path) {
-  const parent = dirName(path);
-  const entries = await listDir(parent || path);
-  return entries.some((e) => e.isDir && e.path === path);
-}
-
 /**
  * 安装 `window.otoolsVideo`。
  *
@@ -440,7 +433,6 @@ export function install() {
     renameEntry,
     revealPath,
     message,
-    isDirectory,
     baseName,
     dirName,
     mimeForPath,

@@ -30,6 +30,9 @@ const FOLDER_NAME = 'Video Studio';
 /** 后端类型标识：上游用它决定要不要挂 OPFS 素材缓存（这里不需要）。 */
 export const KIND = 'otools';
 
+/** 超过这个大小就在控制台留个痕迹（宿主的写接口只收 base64，必然过内存）。 */
+const LARGE_FILE_BYTES = 256 * 1024 * 1024;
+
 function readStoredRoot() {
   try {
     return String(window.localStorage.getItem(ROOT_KEY) || '').trim();
@@ -136,6 +139,13 @@ export function otoolsBackend(root) {
     async writeBlob(path, blob) {
       const target = abs(path);
       await host.createDir(host.dirName(target));
+      // 宿主的写文件接口只收 base64，所以素材进库时必然要在内存里过一次
+      // base64（约 1.33 倍大小）。几百 MB 还能忍，上 GB 会很慢甚至把 webview
+      // 撑爆——这里留个明确的痕迹，免得事后只看到「导入卡住」。
+      if (blob.size > LARGE_FILE_BYTES) {
+        console.warn(`[otools-video] 写入 ${(blob.size / 1048576).toFixed(0)} MB 的素材，需要过一次 base64 IPC，会比较慢：${path}`);
+        host.diag({ lastLargeWrite: path, bytes: blob.size });
+      }
       await host.writeBlob(target, blob);
     },
 
