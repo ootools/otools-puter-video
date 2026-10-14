@@ -34,6 +34,19 @@ import { loadDsp } from './media/dsp.js';
 // 移植层：宿主桥 + 本地磁盘工程库。
 import * as host from './otools/host.js';
 import { otoolsBackend, resolveRoot, ensureRoot } from './otools/backend.js';
+// 移植层：多语言（跟随宿主，可在界面里覆盖）+ 主题跟随。
+import { installI18n, t } from './otools/i18n.js';
+import { installDomTranslation } from './otools/dom-i18n.js';
+import { installThemeFollow, primeThemeFromHost } from './otools/theme-sync.js';
+
+// 语言与主题都要在第一次渲染之前装好：
+//   - installI18n 解析出当前语言（宿主 → 用户覆盖 → 浏览器），并开始监听宿主切换；
+//   - installDomTranslation 挂上 DOM 翻译层，之后上游渲染出来的界面文案会被自动替换；
+//   - primeThemeFromHost + installThemeFollow 让主题跟随宿主（用户自己选过就不跟随）。
+installI18n();
+installDomTranslation();
+primeThemeFromHost();
+installThemeFollow();
 
 const root = document.getElementById('app');
 applyTheme();
@@ -67,17 +80,17 @@ function showHome() {
 
 async function openProject(id, files) {
   view?.dispose?.();
-  loading('Opening project...');
+  loading(t('Opening project...'));
   let project;
   try {
     project = await library.openProject(id);
   } catch (err) {
-    toast(err?.message || "Couldn't open the project.", { kind: 'error' });
+    toast(err?.message || t("Couldn't open the project."), { kind: 'error' });
     showHome();
     return;
   }
   if (project.deletedAt) {
-    toast(`${project.name} is in the Trash. Restore it to open it.`, { kind: 'error' });
+    toast(t('{name} is in the Trash. Restore it to open it.', { name: project.name }), { kind: 'error' });
     history.replaceState(null, '', '#trash');
     showHome();
     return;
@@ -104,26 +117,26 @@ async function openProject(id, files) {
 }
 
 async function createProject(opts = {}, files) {
-  loading('Creating project...');
+  loading(t('Creating project...'));
   try {
     const n = (await library.listProjects()).length + 1;
     const project = await library.createProject({ name: `Project ${n}`, ratio: opts.ratio || 'original' });
     await openProject(project.id, files);
   } catch (err) {
     console.error(err);
-    toast("Couldn't create a project.", { kind: 'error' });
+    toast(t("Couldn't create a project."), { kind: 'error' });
     showHome();
   }
 }
 
 async function openBundle(file) {
-  loading('Opening project file...');
+  loading(t('Opening project file...'));
   try {
     const { project } = await importProjectBundle(library, file);
     await openProject(project.id);
   } catch (err) {
     console.error(err);
-    toast(err?.message || "Couldn't open the project file.", { kind: 'error' });
+    toast(err?.message || t("Couldn't open the project file."), { kind: 'error' });
     showHome();
   }
 }
@@ -135,15 +148,15 @@ async function openBundle(file) {
  * 这里负责把它建出来、把标记文件写上，然后把 `Library` 接上去。
  */
 async function startOtools() {
-  loading('Opening your project folder...');
+  loading(t('Opening your project folder...'));
   let rootPath = '';
   try {
     rootPath = await resolveRoot();
-    if (!rootPath) throw new Error('The host did not report a folder for this computer.');
+    if (!rootPath) throw new Error(t('The host did not report a folder for this computer.'));
     await ensureRoot(rootPath);
   } catch (err) {
     console.error(err);
-    errorScreen('Could not open the project folder', `${host.errorMessage(err)} — pick another folder in OTools and try again.`, () => location.reload());
+    errorScreen(t('Could not open the project folder'), `${host.errorMessage(err)}${t(' — pick another folder in OTools and try again.')}`, () => location.reload());
     return;
   }
   library = new Library(otoolsBackend(rootPath));

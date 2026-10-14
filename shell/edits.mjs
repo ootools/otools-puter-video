@@ -517,6 +517,46 @@ export function needAiDialog(account, what) {
     why: '保存按钮不该再画一朵云（现在存的是本机文件）',
   },
 
+  /* ============================================== 语言菜单（多语言支持的入口） */
+  // 上游只有 Theme 菜单。语言跟随宿主（见 shell/src/otools/i18n.js），但用户
+  // 应该能覆盖它，所以把「语言」放在 Theme 旁边——三处：应用菜单、账户菜单、
+  // 桌面菜单栏的 View 菜单。菜单项的构造在 i18n.js 里（`languageMenuItems`），
+  // 这样「有哪些语言」只有一处定义。
+
+  {
+    file: 'src/ui/topbar.js',
+    find: "import { promptDialog } from './dialog.js';\n",
+    replace: "import { promptDialog } from './dialog.js';\nimport { languageMenuItems } from '../otools/i18n.js';\n",
+    why: '顶栏要用移植层的语言菜单',
+  },
+  {
+    // 应用菜单与账户菜单里的 Theme（4 空格缩进）。带上换行是为了不与
+    // View 菜单里 6 空格缩进的那一处混在一起。
+    file: 'src/ui/topbar.js',
+    find: "\n    { label: 'Theme', icon: 'sun', submenu: themeMenuItems },\n",
+    replace: "\n    { label: 'Theme', icon: 'sun', submenu: themeMenuItems },\n    { label: 'Language', icon: 'languages', submenu: languageMenuItems },\n",
+    expect: 2,
+    why: '应用菜单与账户菜单里加上「语言」',
+  },
+  {
+    file: 'src/ui/topbar.js',
+    find: "\n      { label: 'Theme', icon: 'sun', submenu: themeMenuItems },\n",
+    replace: "\n      { label: 'Theme', icon: 'sun', submenu: themeMenuItems },\n      { label: 'Language', icon: 'languages', submenu: languageMenuItems },\n",
+    why: '桌面菜单栏 View 菜单里加上「语言」',
+  },
+  {
+    file: 'src/ui/preferences-dialog.js',
+    find: "import { prefs, setPref, getTheme, setTheme } from './prefs.js';\n",
+    replace: "import { prefs, setPref, getTheme, setTheme } from './prefs.js';\nimport { preference, setPreference, localeOptionPairs } from '../otools/i18n.js';\n",
+    why: '偏好设置里要放语言选择',
+  },
+  {
+    file: 'src/ui/preferences-dialog.js',
+    find: "    section('Appearance',\n      choiceRow('Theme', 'theme', [['dark', 'Dark'], ['light', 'Light'], ['system', 'Match the system']], { get: getTheme, set: setTheme }),\n    ),",
+    replace: "    section('Appearance',\n      choiceRow('Theme', 'theme', [['dark', 'Dark'], ['light', 'Light'], ['system', 'Match the system']], { get: getTheme, set: setTheme }),\n      choiceRow('Language', 'language', localeOptionPairs(), { get: preference, set: setPreference }),\n    ),",
+    why: '偏好设置的「外观」里加上语言选择（与 Theme 并排）',
+  },
+
   /* ================================ 跟着上面文案一起过期的上游测试断言 */
   // 上游有 3 个用例专门断言「未登录时显示去登录 Puter 的提示」。
   // 上面把提示文案改成实话之后，这三个断言就过期了。改断言（而不是删用例）：

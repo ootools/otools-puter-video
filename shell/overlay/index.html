@@ -23,20 +23,35 @@
     // 退回本地」的分支，AI 与云端入口会各自隐藏，不需要额外改上游代码。
     //
     // 工程存储改由 shell/src/otools/backend.js 接到 OTools 宿主的本地磁盘上。
+    //
+    // 语言与主题都由宿主的 init script 注入（`documentElement.lang` 与 dark/light 类），
+    // 且早于本页任何脚本执行。这段内联脚本只做**首屏之前**必须做完的两件事：
+    //   1. 把宿主主题落成上游的初始主题（避免浅色宿主里闪一下深色）；
+    //   2. 记住「这个值是跟随宿主写进去的」，之后用户在 Theme 菜单里自己选就不会被覆盖。
+    // 语言与后续的实时切换由 shell/src/otools/i18n.js 接管。
     (() => {
-      // 主题：用户没选过就跟 OTools 的界面主题（宿主的 init script 已经把
-      // dark/light 类打在 documentElement 上，且早于本页任何脚本执行）。
-      // 选定一次就写进 localStorage，之后由界面里的 Theme 菜单说了算。
-      let t = null;
-      try { t = localStorage.getItem('video-studio:theme'); } catch {}
-      if (!t) {
-        const cl = document.documentElement.classList;
-        t = cl.contains('dark') ? 'dark' : cl.contains('light') ? 'light' : 'system';
-        try { localStorage.setItem('video-studio:theme', t); } catch {}
+      const THEME_KEY = 'video-studio:theme';
+      const FOLLOWED_KEY = 'otools-video.theme-followed';
+      const read = (key) => { try { return localStorage.getItem(key); } catch { return null; } };
+      const write = (key, value) => { try { localStorage.setItem(key, value); } catch { /* 忽略 */ } };
+
+      const classes = document.documentElement.classList;
+      const hostTheme = classes.contains('dark') ? 'dark' : classes.contains('light') ? 'light' : '';
+      const stored = read(THEME_KEY);
+      const followed = read(FOLLOWED_KEY);
+
+      // 用户自己选过（当前值不是我们跟随宿主写的那一个）→ 尊重用户的选择
+      let theme = stored && stored !== followed ? stored : '';
+      if (!theme && hostTheme) {
+        theme = hostTheme;
+        write(THEME_KEY, hostTheme);
+        write(FOLLOWED_KEY, hostTheme);
       }
-      const dark = t === 'dark' || (t === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+      if (!theme) theme = 'system';
+
+      const dark = theme === 'dark' || (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
       const root = document.documentElement;
-      root.dataset.theme = t;
+      root.dataset.theme = theme;
       root.dataset.themeResolved = dark ? 'dark' : 'light';
     })();
   </script>

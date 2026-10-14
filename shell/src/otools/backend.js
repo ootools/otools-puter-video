@@ -19,6 +19,7 @@
  */
 
 import * as host from './host.js';
+import { t } from './i18n.js';
 
 /** 工程目录记在 localStorage：跨插件重启仍然记得。 */
 const ROOT_KEY = 'otools-video.root';
@@ -85,7 +86,7 @@ function markerPayload(root) {
     app: 'otools-video',
     name: 'Video Studio',
     root,
-    note: 'This folder is the Video Studio plugin project library. Projects, covers and imported media live here as plain files.',
+    note: t('This folder is the Video Studio plugin project library. Projects, covers and imported media live here as plain files.'),
     layout: ['index.json', 'projects/<id>.json', 'covers/<id>.jpg', 'media/<hash>.<ext>', 'luts/index.json', 'luts/<hash>.cube'],
   };
 }
@@ -143,7 +144,7 @@ export function otoolsBackend(root) {
       // base64（约 1.33 倍大小）。几百 MB 还能忍，上 GB 会很慢甚至把 webview
       // 撑爆——这里留个明确的痕迹，免得事后只看到「导入卡住」。
       if (blob.size > LARGE_FILE_BYTES) {
-        console.warn(`[otools-video] 写入 ${(blob.size / 1048576).toFixed(0)} MB 的素材，需要过一次 base64 IPC，会比较慢：${path}`);
+        console.warn(`[otools-video] writing a ${(blob.size / 1048576).toFixed(0)} MB media file through base64 IPC; this will be slow: ${path}`);
         host.diag({ lastLargeWrite: path, bytes: blob.size });
       }
       await host.writeBlob(target, blob);

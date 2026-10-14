@@ -12,9 +12,10 @@
    | 改动的形状 | 放哪 |
    | --- | --- |
    | 这个文件存在的理由变了（入口、构建配置、启动流程） | `shell/overlay/`（整文件替换） |
-   | 全新的代码（宿主桥、后端、胶水） | `shell/src/otools/`（新增模块，**不允许覆盖上游同名文件**） |
+   | 全新的代码（宿主桥、后端、胶水、i18n） | `shell/src/otools/`（新增模块，**不允许覆盖上游同名文件**） |
    | 1~5 行的局部改动（去掉一个入口、换一句文案、把 Puter 换成宿主） | `shell/edits.mjs` |
    | 整块功能要拿掉（评审、云） | `shell/drop.mjs` |
+   | 移植层自己的测试 | `shell/tests/`（拷到 `.build/tests/`，与上游测试同一个 vitest 进程） |
 3. **`shell/edits.mjs` 的每一条都必须能命中**。`expect` 是硬约束：上游改了那段代码，
    构建会报「命中 N 次，期望 M 次」并打印是哪一条、为什么改。**不要为了让构建过而放宽 `expect`**，
    要去读上游的新代码，把 `find`/`replace` 更新到新的形状。
@@ -49,8 +50,48 @@
 | `shell/src/otools/host.js` | 宿主桥：`window.otoolsVideo`（对话框 / 读写 / 列目录 / 建目录 / 删除 / 重命名 / 主题 / 诊断） |
 | `shell/src/otools/backend.js` | `otoolsBackend`：实现上游 `storage/backends.js` 的接口，落到本机目录 |
 | `shell/src/otools/ui.js` | 界面胶水：工程目录卡片、`saveBlobAs`、`saveBlobToVideos`、`hostMessage` |
-| `shell/edits.mjs` | 44 条局部改动（评审入口、Puter 文案、导出改宿主、保存图标） |
+| `shell/src/otools/i18n.js` | 多语言运行时：读宿主语言、三条监听、用户覆盖、`t()`、给菜单用的语言项 |
+| `shell/src/otools/i18n.zh-CN.js` | 简体中文词典（键 = 英文原文，逐字符一致） |
+| `shell/src/otools/dom-i18n.js` | DOM 翻译层：只精确匹配、用户内容整棵子树跳过、可逆 |
+| `shell/src/otools/theme-sync.js` | 主题跟随宿主（「跟随，直到用户自己选」） |
+| `shell/edits.mjs` | 53 条局部改动（评审入口、Puter 文案、导出改宿主、保存图标、语言菜单） |
 | `shell/drop.mjs` | 从构建树里删掉的路径（评审、上游的假 Puter 夹具）+ 删完之后必须还在的文件清单 |
+| `shell/tests/` | 移植层测试：i18n 运行时 + DOM 翻译层的边界（27 个用例） |
+
+## 多语言的规矩
+
+上游没有 i18n，界面文案是散在 60 多个文件里的英文字面量。我们靠
+**运行时 DOM 翻译层 + 我们自己的词典**把它变成中文，所以有几条必须守：
+
+- **词典的键是「英文原文」**，必须与源码里的字面量逐字符一致（包括 `…`、`’`、
+  末尾的 `...`）。值不会被再次翻译，可以放心用中文词。
+- **不要翻译动态拼接的文案**。`Undo ${label}`、`Saved to ${path}` 这种匹配不上，
+  用「前缀」当键是无效的。要覆盖它们就得改 `edits.mjs`（把整句变成固定文案）
+  或者放弃。
+- **不要把用户内容加进词典**。片段名、文件名、项目名、字幕正文都可能是任意字符串，
+  撞上词典键就会被改写。`SKIP_SELECTORS` 里列了这些容器；发现新的用户内容区就往里加。
+- **改了 `edits.mjs` 里引入的英文文案，就要同步改词典的键**——键对不上，那句就永远是英文。
+- **上游同步之后跑一次 `node scripts/i18n-report.mjs`**，看覆盖率掉到哪了，
+  用 `--missing` 把新增的补进词典。报告还会查**重复键**（JS 对象允许重复键，
+  后者会静默吃掉前者）。
+- **不要试图用「正则在源码上批量替换中文」**。那等于 fork 上游，下次同步全冲突。
+  要翻译就走词典 + DOM 层。
+
+## 语言与主题的宿主契约
+
+宿主在创建 webview 时注入，之后改设置会**再推一次**：
+
+```js
+documentElement.lang = '<locale>';  window.__OTOOLS_LOCALE__ = { locale };
+window / document 派发 'otools-locale-changed'
+documentElement 上切 dark / light 类 + data-theme-mode / data-theme-accent + --el-color-* 变量
+window.__OTOOLS_THEME__ = { themeMode, themeAccent, resolvedTheme };
+window / document 派发 'otools-theme-changed'
+```
+
+三条监听（CustomEvent、`lang` 属性变化、`storage`）是刻意的冗余：不同宿主版本推的
+方式不完全一样。**别把 `documentElement.lang` 当成「我们自己的状态」**——
+`i18n.js` 里 `ourLang` 就是用来区分「宿主改的」和「我们改的」，去掉它会来回打架。
 
 ## 常见任务
 

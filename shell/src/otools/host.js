@@ -40,8 +40,9 @@
  * 上游的浏览器行为（`<input type=file>` 导入、下载导出）继续可用。
  */
 
-const DIAG_KEY = 'otools-video.diag';
+import { t } from './i18n.js';
 
+const DIAG_KEY = 'otools-video.diag';
 /* ------------------------------------------------------------------ 工具 */
 
 /** 诊断面包屑：插件没有 devtools，localStorage 是事后唯一能看到内部状态的渠道。 */
@@ -142,7 +143,7 @@ function isMissing(err) {
 }
 
 export function errorMessage(err) {
-  if (!err) return '未知错误';
+  if (!err) return t('Unknown error');
   if (typeof err === 'string') return err;
   return String(err.message || err.error?.message || err);
 }
@@ -169,7 +170,7 @@ function tauriInvoke() {
 
 function invokeRaw(command, payload) {
   const invoke = tauriInvoke();
-  if (!invoke) return Promise.reject(new Error('OTools 宿主不可用'));
+  if (!invoke) return Promise.reject(new Error(t('OTools host is not available')));
   return invoke(command, payload);
 }
 
@@ -330,7 +331,7 @@ export async function writeFile(path, dataBase64) {
     await a.writeHostFile({ path, dataBase64 });
     return path;
   }
-  throw new Error('OTools 宿主不可用');
+  throw new Error(t('OTools host is not available'));
 }
 
 /** 写 Blob 到宿主路径。 */

@@ -7,12 +7,16 @@
  *   3. 「存到视频目录」：不弹对话框，直接落到宿主的 Videos 目录（导出对话框的默认目的地）
  *
  * 全部在宿主不可用时返回 null / false，让调用方退回上游原有的浏览器行为。
+ *
+ * 文案一律走 `t()`：键就是英文原文，与 `i18n.zh-CN.js` 的键同一套约定，
+ * 这样移植层的字符串也能被 `scripts/i18n-report.mjs` 一起统计。
  */
 
 import { h } from '../lib/dom.js';
 import { icon } from '../lib/icons.js';
 import { openDialog, toast } from '../ui/dialog.js';
 import * as host from './host.js';
+import { t } from './i18n.js';
 import { resolveRoot, setRoot } from './backend.js';
 
 /** 宿主可用才接管。 */
@@ -31,7 +35,7 @@ export function hostMessage(err) {
  * 弹宿主另存对话框并写盘。
  * @returns {Promise<string|null>} 落盘路径；用户在对话框里取消时 null。
  */
-export async function saveBlobAs(blob, fileName, { title = 'Save as', filters } = {}) {
+export async function saveBlobAs(blob, fileName, { title = t('Save as'), filters } = {}) {
   if (!hostReady()) return null;
   const path = await host.pickSavePath({ title, defaultPath: fileName, filters });
   if (!path) return null;
@@ -86,7 +90,7 @@ export function storageFolderButton(library) {
   const backend = library?.backend;
   if (!backend || backend.kind !== 'otools') return null;
 
-  const btn = h('button.btn.small.block', { type: 'button', 'aria-label': 'Project folder' },
+  const btn = h('button.btn.small.block', { type: 'button', 'aria-label': t('Project folder') },
     icon('folderOpen', 14), h('span.folder-label', shortPath(backend.root)));
 
   const sync = () => {
@@ -98,13 +102,14 @@ export function storageFolderButton(library) {
 
   btn.addEventListener('click', () => {
     const pathEl = h('p.dialog-text.folder-path', backend.root || '');
-    const change = h('button.btn.primary', { type: 'button' }, icon('folderInput', 16), 'Change folder');
-    const reveal = h('button.btn', { type: 'button' }, icon('folderOpen', 16), 'Show in file manager');
-    const copy = h('button.btn', { type: 'button' }, icon('copy', 16), 'Copy path');
-    const close = h('button.btn', { type: 'button' }, 'Close');
+    const change = h('button.btn.primary', { type: 'button' }, icon('folderInput', 16), t('Change folder'));
+    const reveal = h('button.btn', { type: 'button' }, icon('folderOpen', 16), t('Show in file manager'));
+    const copy = h('button.btn', { type: 'button' }, icon('copy', 16), t('Copy path'));
+    const close = h('button.btn', { type: 'button' }, t('Close'));
     const dlg = openDialog({
-      title: 'Project folder',
-      body: h('div', h('p.dialog-text', 'Projects, covers and imported media are plain files in this folder. Point it at a synced folder (OneDrive, Dropbox, a git repo…) to back projects up.'),
+      title: t('Project folder'),
+      body: h('div',
+        h('p.dialog-text', t('Projects, covers and imported media are plain files in this folder. Point it at a synced folder (OneDrive, Dropbox, a git repo…) to back projects up.')),
         pathEl),
       actions: [close, copy, reveal, change],
       className: 'small',
@@ -112,22 +117,24 @@ export function storageFolderButton(library) {
     close.addEventListener('click', () => dlg.close());
     copy.addEventListener('click', () => {
       try { navigator.clipboard.writeText(backend.root); } catch { /* 忽略 */ }
-      toast('Folder path copied.', { kind: 'success' });
+      toast(t('Folder path copied.'), { kind: 'success' });
     });
     reveal.addEventListener('click', () => host.revealPath(backend.root));
     change.addEventListener('click', async () => {
       change.disabled = true;
       try {
-        const picked = await host.pickFolder({ title: 'Choose the project folder', directory: backend.root });
-        if (!picked) return;
-        if (picked === backend.root) return;
+        const picked = await host.pickFolder({ title: t('Choose the project folder'), directory: backend.root });
+        if (!picked || picked === backend.root) {
+          change.disabled = false;
+          return;
+        }
         await setRoot(picked);
         dlg.close();
         // 工程库换了根目录，最省事也最不容易出错的做法是重新加载整个应用。
-        toast('Project folder changed. Reloading…', { kind: 'success' });
+        toast(t('Project folder changed. Reloading…'), { kind: 'success' });
         setTimeout(() => window.location.reload(), 400);
       } catch (err) {
-        toast(`Could not change the folder: ${host.errorMessage(err)}`, { kind: 'error' });
+        toast(`${t('Could not change the folder: ')}${host.errorMessage(err)}`, { kind: 'error' });
         change.disabled = false;
       }
     });

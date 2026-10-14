@@ -158,6 +158,17 @@ export function prepareTree() {
     }
   }
 
+  // 3b) shell/tests/ → .build/tests/（移植层自己的测试；同样不许覆盖上游的测试）
+  // 放在 tests/ 下是为了让 `node scripts/test.mjs` 一次跑完两边——上游的回归
+  // 与移植层的回归在同一个 vitest 进程里。
+  const testsDir = path.join(repoRoot, 'shell', 'tests');
+  const addedTests = fs.existsSync(testsDir) ? copyInto(testsDir, path.join(buildDir, 'tests')).copied : [];
+  for (const relative of addedTests) {
+    if (upstreamFiles.includes(`tests/${relative}`)) {
+      throw new Error(`shell/tests/${relative} 会覆盖上游的 tests/${relative}。要替换上游测试请放 shell/overlay/tests/${relative}。`);
+    }
+  }
+
   // 4) 逐条应用 edits.mjs
   const failures = [];
   for (const edit of edits) {
@@ -197,6 +208,7 @@ export function prepareTree() {
   for (const relative of upstreamFiles) if (!underDrop(relative)) expected.add(relative);
   for (const relative of overlayFiles) expected.add(relative);
   for (const relative of addedFiles) expected.add(`src/${relative}`);
+  for (const relative of addedTests) expected.add(`tests/${relative}`);
   const stale = walk(buildDir).filter((relative) => !expected.has(relative));
   if (stale.length > SWEEP_LIMIT) {
     throw new Error(`构建树里有 ${stale.length} 个不该存在的文件（上限 ${SWEEP_LIMIT}）。\n这通常是上游一次删了很多文件。请手动删掉 .build/ 后重跑。`);
@@ -205,8 +217,8 @@ export function prepareTree() {
   pruneEmptyDirs(buildDir);
 
   const lock = readUpstreamLock();
-  const stats = { files: upstreamFiles.length, overlay: overlayFiles.length, added: addedFiles.length, patched: edits.length, dropped, swept: stale.length };
-  log(`合成 .build/：上游 ${stats.files} 个文件，覆盖 ${stats.overlay} 个，新增 ${stats.added} 个，改动 ${stats.patched} 条，删除 ${stats.dropped} 项，清扫 ${stats.swept} 个残留`);
+  const stats = { files: upstreamFiles.length, overlay: overlayFiles.length, added: addedFiles.length, tests: addedTests.length, patched: edits.length, dropped, swept: stale.length };
+  log(`合成 .build/：上游 ${stats.files} 个文件，覆盖 ${stats.overlay} 个，新增 ${stats.added} 个模块 + ${stats.tests} 个测试，改动 ${stats.patched} 条，删除 ${stats.dropped} 项，清扫 ${stats.swept} 个残留`);
   if (lock?.commit) {
     log(`上游：${lock.repo} ${lock.subpath} @ ${String(lock.commit).slice(0, 12)}（${lock.commitDate || '日期未知'}）`);
   }

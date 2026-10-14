@@ -27,21 +27,27 @@ otools-video/
 ├── upstream/                    # HeyPuter/everything 的 src/video-studio 快照（原样，勿改）
 ├── shell/                       # 移植层（本仓库唯一需要维护的代码）
 │   ├── overlay/                 #   整文件替换，按同路径盖到构建树上
-│   │   ├── index.html           #     入口：不再加载 js.puter.com，主题跟随 OTools
+│   │   ├── index.html           #     入口：不再加载 js.puter.com；首屏前定好主题
 │   │   ├── vite.config.js       #     产物落到仓库根 dist/；不再引上游的 dev 插件
 │   │   └── src/main.js          #     启动时选「宿主 + 本机目录」还是「浏览器兜底」
 │   ├── src/otools/              #   新增模块，拷到构建树的 src/otools/
 │   │   ├── host.js              #     宿主桥：对话框、读写、列目录、建目录、删除、重命名
 │   │   ├── backend.js           #     工程库后端：实现上游 storage/backends.js 的接口
-│   │   └── ui.js                #     界面胶水：工程目录卡片、另存、存到视频目录
+│   │   ├── ui.js                #     界面胶水：工程目录卡片、另存、存到视频目录
+│   │   ├── i18n.js              #     多语言运行时：跟随宿主、可覆盖、实时切换
+│   │   ├── i18n.zh-CN.js        #     简体中文词典（英文原文 → 译文）
+│   │   ├── dom-i18n.js          #     DOM 翻译层：把上游界面上的英文换成译文
+│   │   └── theme-sync.js        #     主题跟随宿主
 │   ├── edits.mjs                #   外科手术式字符串替换清单（逐条校验命中次数）
-│   └── drop.mjs                 #   从构建树里删掉的上游文件（评审、云、上游开发夹具）
+│   ├── drop.mjs                 #   从构建树里删掉的上游文件（评审、云、上游开发夹具）
+│   └── tests/                   #   移植层自己的测试（i18n 运行时与 DOM 翻译层的边界）
 ├── scripts/
 │   ├── sync-upstream.mjs        #   稀疏拉取上游快照 + 写 upstream.lock.json + --check
 │   ├── tree.mjs                 #   合成 .build/（overlay + edits + drops + 清扫）
 │   ├── build.mjs                #   node scripts/build.mjs  → dist/
 │   ├── dev.mjs                  #   node scripts/dev.mjs    → vite dev（HMR，端口 5517）
-│   ├── test.mjs                 #   跑上游的测试套件，但跑在移植后的构建树上
+│   ├── test.mjs                 #   跑上游的测试套件 + 移植层测试，都在移植后的构建树上
+│   ├── i18n-report.mjs          #   多语言覆盖率 / 重复键 / 缺口清单
 │   ├── serve-dist.mjs           #   把 dist/ 当静态站点跑起来（无宿主，用于浏览器试）
 │   ├── pack-plugin.mjs          #   打包 .oplg + 发布目录
 │   ├── verify-plugin.mjs        #   校验 .oplg（ZIP/CRC/摘要/入口/无 Puter SDK）
@@ -155,6 +161,101 @@ Video Studio/
 
 ---
 
+## 多语言与主题跟随
+
+### 宿主怎么把语言交过来
+
+OTools 的宿主会在**创建 webview 时**把语言与主题注入进来，之后在宿主里改设置会**再推一次**
+（见宿主 `src-tauri/src/platform/webview/core.rs`）。注入的脚本等价于：
+
+```js
+document.documentElement.setAttribute('lang', 'zh-CN');
+window.__OTOOLS_LOCALE__ = { locale: 'zh-CN' };
+window.dispatchEvent(new CustomEvent('otools-locale-changed', { detail: { locale: 'zh-CN' } }));
+document.dispatchEvent(new CustomEvent('otools-locale-changed', { detail: { locale: 'zh-CN' } }));
+```
+
+主题是同一套：`documentElement` 上的 `dark` / `light` 类、`data-theme-mode`、
+`data-theme-accent`、一堆 `--el-color-*` 变量，加上 `window.__OTOOLS_THEME__` 与
+`otools-theme-changed` 事件。
+
+`shell/src/otools/i18n.js` 与 `theme-sync.js` 就盯这两套东西，所以**宿主里改语言/主题，
+插件立刻跟着变，不需要重开插件**。三条监听同时用（CustomEvent、`lang` 属性变化、
+`storage`），因为不同宿主版本推的方式不完全一样。
+
+### 语言从哪来
+
+优先级从高到低：
+
+| 来源 | 说明 |
+| --- | --- |
+| 用户在本插件里选的 | 存在 `otools-video.locale`。菜单：**顶栏 → Theme 旁边 → Language**，以及 **偏好设置 → 外观 → Language** |
+| 宿主推的 | 上面那套注入。默认行为就是跟随宿主 |
+| 浏览器语言 | 宿主没说话时（例如把 `dist/` 拖进普通浏览器）用 `navigator.language` |
+
+语言名用各自的语言写（`简体中文` / `English`），只有「跟随 OTools」那一项跟着界面语言走。
+宿主支持 8 种语言（zh-CN / en-US / ja-JP / ko-KR / de-DE / ru-RU / es-ES / ar-SA），
+**我们目前提供简体中文一份译文**；其它语言回退英文原文——上游本来就是英文界面，回退是安全的。
+页面实际显示什么语言，`documentElement.lang` 就写什么（宿主是日语而我们只有英文时，
+`lang` 会是 `en-US`，否则字体与断行会按日文来）。阿拉伯语会额外把 `dir` 设成 `rtl`。
+
+### 上游界面怎么变中文
+
+上游的界面文案是散在 60 多个文件里的英文字面量，**没有 i18n 钩子，也没有集中的文案表**。
+「不改上游」这条底线之下，只有一条路：运行时的 DOM 翻译层（`shell/src/otools/dom-i18n.js`）
+配上我们自己的词典（`shell/src/otools/i18n.zh-CN.js`）。
+
+它的边界比功能更重要：
+
+- **只精确匹配**：文本节点去掉首尾空白后必须与词典的键逐字符相同才替换。
+  所以动态拼接的文案（`Undo 移动片段`、`Saved to C:\…`）不会被误伤。
+- **用户内容整棵子树跳过**：时间线片段名、素材文件名、项目名、字幕正文、轨道名…
+  见 `SKIP_SELECTORS`。翻译它们等于改用户的数据。
+- 只碰文本与 `title` / `aria-label` / `placeholder` / `data-tip` / `alt`，不碰表单值、canvas、svg。
+- 记着每个节点的**原文**，所以切语言是幂等的、可逆的（中文 → 英文 → 中文不会套娃）。
+
+**覆盖率**（当前上游快照）：
+
+```bash
+node scripts/i18n-report.mjs             # 总览 + 缺口最大的文件 + 重复键检查
+node scripts/i18n-report.mjs --missing   # 还没翻译的原文清单
+node scripts/i18n-report.mjs --file src/ui/home.js
+```
+
+```
+候选文案：1439 条不同文案，共出现 1662 次
+词典条目：1591 条
+已覆盖：1370/1439（95.2%），按出现次数算 95.7%
+```
+
+剩下那 5% 基本是**刻意不翻译**的：字体名（Poppins / Inter / Anton…）、编码与容器名
+（H.264 / M4A (AAC) / OGG (Opus)）、音乐曲名，以及**评审分享**那一块——评审功能整个
+从构建里删掉了，它的文案翻了也没用。没翻到的原文保持英文显示：露英文比露 key 好。
+
+### 加一种语言
+
+1. 复制 `shell/src/otools/i18n.zh-CN.js` 成 `i18n.<locale>.js`，改值（键不动）。
+2. 在 `shell/src/otools/i18n.js` 顶上 import 并 `registerCatalog('<locale>', ...)`，
+   同时在 `LOCALE_LABELS` 里加它的显示名。
+3. `node scripts/i18n-report.mjs` 看还差多少。
+
+词典是**平的** `{ '英文原文': '译文' }`，键与上游源码逐字符一致（包括 `…`、`’`、
+末尾的 `...`）。上游同步之后重跑一次报告，把新增的补进来即可。
+
+### 主题跟随
+
+上游自己有主题（`video-studio:theme`，值 `dark` / `light` / `system`，界面里也有 Theme 菜单），
+和宿主的主题不能打架，规则是「**我们跟随，直到用户自己选**」：
+
+- 跟随宿主时把值写进 `video-studio:theme`，同时把写过的值记在 `otools-video.theme-followed`；
+- 下次两者不一致 → 是用户在 Theme 菜单里自己选的 → 从此不再跟随；
+- 用户选回跟宿主一样的值时，跟随自动重新生效。
+
+首屏之前的那一次跟随由 `shell/overlay/index.html` 的内联脚本完成（避免浅色宿主里闪一下深色），
+之后交给 `theme-sync.js`。
+
+---
+
 ## 构建
 
 ```bash
@@ -256,6 +357,9 @@ node scripts/build.mjs              # 有红就是某条 edit 对不上上游了
 - **导出走系统另存对话框**：有宿主时，导出完成的每个文件都会弹一次另存对话框
   （多时间线导出就是多个对话框，串行）。想不弹窗就用导出设置里的「Videos folder」目的地。
 - **AI 功能全部不可用**，相关面板显示「本插件不接云端 AI」。
+- **上游界面靠运行时翻译**：词典覆盖 95% 的候选文案（按出现次数 96%），
+  剩下的是字体名 / 编码名 / 曲名 / 已删掉的评审功能。没翻到的保持英文。
+  这是「不改上游」的代价，也是它的好处——上游更新时只要补词典，不用改代码。
 - **浏览器直开（无宿主）时退回上游行为**：工程存在浏览器 OPFS 里，导入/导出走浏览器自己的
   对话框，导出是浏览器下载（Tauri webview 里没宿主时下载可能不落盘——那是兜底路径，不是正常用法）。
 - **「回收站」是逻辑删除**：上游的设计，删除只是打标记，30 天后才真正清理文件。
