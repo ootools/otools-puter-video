@@ -389,6 +389,33 @@ const canSaveLocally = () => hostReady();`,
     why: '文件头注释里的描述',
   },
 
+  /* ================================ 默认导出格式：VP9 / WebM ================================ */
+  // H.264 / HEVC 在本插件里走的是 WebCodecs 的**硬件**编码路径：某些 webview
+  // （macOS 上的 WKWebView 尤其常见）isConfigSupported() 说支持，真正开始编码却
+  // 静默挂起——不会抛错，进度永远停在 0%。VP9 是软件编码，在这些环境里能跑完，
+  // 所以默认改成 VP9 / WebM；用户仍可以在导出设置里手动选回 H.264 / MP4。
+  // 注意：DEFAULT_SETTINGS 只决定「第一次」的默认值，之后的取值来自 prefs
+  // （export-dialog.js 的 remember()），所以下面还有一条「卡住自动改用 VP9 重试」，
+  // 已经存过 H.264 偏好的机器也能自愈。
+  {
+    file: 'src/engine/exporter.js',
+    find: "  codec: 'avc',\n  format: 'mp4',",
+    replace: "  codec: 'vp9',\n  format: 'webm',",
+    expect: 1,
+    why: '默认导出格式改成 VP9 / WebM：WebCodecs 硬件编码在部分 webview 里会静默挂起',
+  },
+
+  // 上游这条断言写的是「H.264 + 192 kbps 音频，一分钟大约 70~80 MB」，但它用的是
+  // `{ ...DEFAULT_SETTINGS }`——默认格式一改成 VP9（码率效率 0.65）数字就对不上了。
+  // 断言的意图没变，所以这里把格式钉死成它当年假设的 H.264 / MP4。
+  {
+    file: 'tests/export.test.js',
+    find: "    const s = { ...DEFAULT_SETTINGS, video: true, includeAudio: true, audio: false };",
+    replace: "    const s = { ...DEFAULT_SETTINGS, codec: 'avc', format: 'mp4', video: true, includeAudio: true, audio: false };",
+    expect: 1,
+    why: '默认导出格式改成 VP9 后，这条体积估算断言仍应按它原本假设的 H.264 计算',
+  },
+
   /* ===== 导出卡 0% 看门狗：编码无进度时给出明确报错，而不是永远停在 0% ===== */
   {
     file: 'src/ui/export-dialog.js',
@@ -400,7 +427,9 @@ const canSaveLocally = () => hostReady();`,
     let firstProgressSeen = false;
     let stallTimer = null;
     let stallReject = null;
-    let stallPromise = null;`,
+    let stallPromise = null;
+    // 已经因为卡住而自动改用 VP9 / WebM 重试过一次（每次导出只重试一次）。
+    let codecFallback = false;`,
     expect: 1,
     why: '导出卡 0% 看门狗：声明状态变量',
   },
@@ -440,10 +469,49 @@ const canSaveLocally = () => hostReady();`,
   },
   {
     file: 'src/ui/export-dialog.js',
-    find: "        });",
-    replace: "        });\n        const r = await Promise.race([ runP, stallPromise ]);\n        runP.catch(() => {});",
+    find: "        phaseEl.textContent = jobs.length > 1 ? `${jobLabel} (${j + 1} of ${jobs.length})` : { video: 'Rendering video', audio: 'Mixing audio', gif: 'Rendering GIF', captions: 'Writing captions' }[kind];",
+    replace: "        phaseEl.textContent = codecFallback && kind === 'video' ? '当前编码格式无响应，已改用 VP9 / WebM 重试' : (jobs.length > 1 ? `${jobLabel} (${j + 1} of ${jobs.length})` : { video: 'Rendering video', audio: 'Mixing audio', gif: 'Rendering GIF', captions: 'Writing captions' }[kind]);",
     expect: 1,
-    why: '导出卡 0% 看门狗：run 与超时 promise 竞速；run 悬挂的 rejection 用 noop 接住',
+    why: '自动改用 VP9 / WebM 重试时，进度页的阶段文字要说清发生了什么',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "        });",
+    replace: `        });
+        let r;
+        try {
+          r = await Promise.race([ runP, stallPromise ]);
+        } catch (err) {
+          runP.catch(() => {});
+          if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+          // H.264 / HEVC 走的是系统（硬件）编码器：某些 webview 里 isConfigSupported
+          // 说支持、真正编码时却静默挂起。卡住时自动改用 VP9 / WebM 软件编码重试
+          // 一次，用户仍可以在设置里手动选回 H.264。VP9 本身不被支持时不重试，
+          // 免得从一个坑跳进另一个坑。
+          if (kind === 'video' && err?.code === 'encoder-stalled' && s.codec !== 'vp9' && !codecFallback && (!caps || caps.video.includes('vp9'))) {
+            codecFallback = true;
+            // 放弃卡住的那次导出（能响应时它会自己收尾），换一个 controller 给重试用；
+            // 「取消」按钮读的是变量，所以仍然指向重试。
+            const stuck = controller;
+            controller = new AbortController();
+            try { stuck.abort(); } catch { /* 已经卡死的那次可能永远不会响应 */ }
+            s.codec = 'vp9';
+            s.format = 'webm';
+            remember(s);
+            announce('已改用 VP9 / WebM 重新导出');
+            pct.textContent = '0%';
+            bar.style.width = '0%';
+            barEl.setAttribute('aria-valuenow', '0');
+            stFrames.dd.textContent = '--';
+            stSpeed.dd.textContent = '--';
+            j -= 1;
+            continue;
+          }
+          throw err;
+        }
+        runP.catch(() => {});`,
+    expect: 1,
+    why: '导出卡 0% 看门狗：run 与超时 promise 竞速；卡住时自动改用 VP9 / WebM 重试一次',
   },
   {
     file: 'src/ui/export-dialog.js',
@@ -472,7 +540,8 @@ const canSaveLocally = () => hostReady();`,
       }
       if (err?.code === 'encoder-stalled') {
         console.error('Export stalled: no encode progress within timeout');
-        fail('视频编码卡住：当前环境可能无法使用 WebCodecs 视频编码。请尝试降低分辨率或帧率，或改用 GIF 导出。');
+        if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+        fail('导出卡住：视频编码一直没有进度。请尝试降低分辨率或帧率、缩短导出范围，或改用 GIF 导出。');
         return;
       }
       console.error(err);
