@@ -22,6 +22,11 @@
     "导出视频",
     "capcut"
   ],
+  "native": {
+    "enabled": true,
+    "libDir": "lib",
+    "autoReload": true
+  },
   "openInBrowser": false,
   "packid": "otools-video",
   "screenshots": [],

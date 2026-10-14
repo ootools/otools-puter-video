@@ -1,0 +1,19 @@
+[package]
+name = "otools-video-native"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+name = "otools_video_native"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[workspace]
+
+# 独立 workspace，不继承仓库根 profile。与 gif-native 一致：cargo release 默认
+# strip = "debuginfo"，链接后改写 Mach-O 会让 dyld 在部分布局下拒绝加载，故显式关掉。
+[profile.release]
+strip = "none"

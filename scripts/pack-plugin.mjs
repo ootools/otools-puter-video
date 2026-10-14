@@ -144,7 +144,8 @@ function main() {
     if (fs.existsSync(full)) entries.push({ name: logo, data: fs.readFileSync(full) });
   }
 
-  // 3) 前端产物 dist/（本插件没有 lib/：纯前端，无 native cdylib）
+  // 3) 前端产物 dist/ 与原生编码库 lib/（lib/ 由 scripts/build-native.mjs 生成；
+  // macOS 上是 lib/macOS.dylib，宿主按 plugin.json 的 native.libDir 加载）。
   for (const name of ['dist', 'lib']) {
     const dir = path.join(root, name);
     if (!fs.existsSync(dir)) continue;
@@ -178,7 +179,7 @@ function main() {
     output,
     entries: entries.length,
     totalBytes: entries.reduce((sum, item) => sum + item.data.length, 0),
-    nativeLibs: [],
+    nativeLibs: entries.map((item) => item.name).filter((name) => name.startsWith('lib/')),
   };
   fs.writeFileSync(path.join(outDir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
   process.stdout.write(`${JSON.stringify(meta)}\n`);
