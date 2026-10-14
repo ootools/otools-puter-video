@@ -3,29 +3,41 @@
  * ------------------------------------------------------------------
  * 为什么需要它：`VideoEncoder.isConfigSupported()` 会骗人。WebKit 上它会真的
  * 实例化一次编码器再返回 true，但「能创建」不等于「能出帧」——某些 webview
- * （macOS 上嵌在宿主里的 WKWebView）里 H.264 创建成功、编码时却静默挂起。
- * 所以判断一个编码能不能用，唯一可靠的办法是**真的编几帧出来看看**。
+ * （macOS 上嵌在宿主里的 WKWebView）里 H.264 创建成功、真正开始编码却可能在中途
+ * （比如第 8 帧）静默挂起。所以判断一个编码能不能用，唯一可靠的办法是**真的编
+ * 若干帧出来看看**。
  *
- * 它绕开了 mediabunny、绕开了渲染管线，只用浏览器自己的 VideoEncoder，
- * 所以探测结果可以明确区分：
- *   - 浏览器根本不支持这个编码（isConfigSupported = false）
- *   - 说支持，但编不出帧（就是「卡 0%」那种）
- *   - 真能用（顺便给出帧率量级）
+ * 它绕开了 mediabunny、绕开了渲染管线，只用浏览器自己的 VideoEncoder。但探测参数
+ * **必须贴近真实导出**：
+ *   - 分辨率/码率取真实导出的 width/height/bitrate（否则拿 320×180 编 3 帧，
+ *     会漏掉「1080p 下第 8 帧才卡」这种规模相关的挂起，误判成「可用」）。
+ *   - 帧数给够（默认 40+），要能跨过中途卡死。
+ * 于是同样的探测能回答两种完全不同的根因：
+ *   - 真实参数下 H.264 WebCodecs 也卡      → 是编码器/GPU 进程的问题（Branch A）。
+ *   - 真实参数下 H.264 WebCodecs 能编完    → 卡的是上面的 mediabunny（Branch B）。
  */
-
-/** 各编码的探测串，写成各浏览器真正认的形式（与 exporter.js 的 VIDEO_CODECS 对齐）。 */
-const CODEC_STRINGS = {
-  avc: 'avc1.42001f',
-  hevc: 'hvc1.1.6.L120.90',
-  vp9: 'vp09.00.10.08',
-  av1: 'av01.0.04M.08',
-};
 
 export const CODEC_LABELS = { avc: 'H.264', hevc: 'HEVC', vp9: 'VP9', av1: 'AV1' };
 
-const WIDTH = 320;
-const HEIGHT = 180;
-const FRAMES = 3;
+/**
+ * 按分辨率挑一个「浏览器大概率认、且能装下这个分辨率」的编码串。
+ * isConfigSupported 会看分辨率/等级，串选小了（比如拿 baseline@3.1 去问 1080p）
+ * 会被判 false，那是个假阴性，会误导诊断。所以按高度选一串够用的。
+ */
+function codecStringFor(codec, height) {
+  switch (codec) {
+    case 'avc':
+      return height > 720 ? 'avc1.640028' : 'avc1.42001f'; // High@4.0（覆盖 1080p）/ Baseline@3.1
+    case 'hevc':
+      return height > 1080 ? 'hvc1.2.4.L150.90' : 'hvc1.1.40.L120.90'; // 8-bit Main(Tier)
+    case 'vp9':
+      return height > 1080 ? 'vp09.00.60.08' : 'vp09.00.40.08'; // VP9 level 4（覆盖 1080p）
+    case 'av1':
+      return 'av01.0.08M.08'; // Main 8-bit，1080p 够用
+    default:
+      return codec;
+  }
+}
 
 function withTimeout(promise, ms) {
   return new Promise((resolve, reject) => {
@@ -39,25 +51,30 @@ function withTimeout(promise, ms) {
   });
 }
 
-/** 画一帧纯色画面（内容不重要，只要求编码器真的产出数据）。 */
-function makeFrame(timestamp) {
+function makeCanvas(width, height) {
   const canvas = typeof OffscreenCanvas === 'function'
-    ? new OffscreenCanvas(WIDTH, HEIGHT)
-    : Object.assign(document.createElement('canvas'), { width: WIDTH, height: HEIGHT });
-  const g = canvas.getContext('2d');
-  if (!g) return null;
-  g.fillStyle = timestamp ? '#3366aa' : '#aa3366';
-  g.fillRect(0, 0, WIDTH, HEIGHT);
-  return new VideoFrame(canvas, { timestamp });
+    ? new OffscreenCanvas(width, height)
+    : Object.assign(document.createElement('canvas'), { width, height });
+  return canvas;
 }
 
-async function probeOne(codec, timeoutMs) {
+async function probeOne(codec, cfg, timeoutMs) {
   const out = { codec, label: CODEC_LABELS[codec] || codec, supported: false, frames: 0, ms: 0, error: '' };
   if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') {
     out.error = 'no-webcodecs';
     return out;
   }
-  const config = { codec: CODEC_STRINGS[codec] || codec, width: WIDTH, height: HEIGHT, bitrate: 1_000_000, framerate: 30 };
+  const fps = cfg.framerate || 30;
+  const config = {
+    codec: codecStringFor(codec, cfg.height),
+    width: cfg.width,
+    height: cfg.height,
+    bitrate: cfg.bitrate,
+    framerate: fps,
+  };
+  // 只想复刻真实导出时，把它用过的硬件偏好带回去（对 H.264 的 GPU 进程路径没影响，
+  // 但 VP9 会据此决定进程内软编/别处）。
+  if (cfg.hardware && cfg.hardware !== 'no-preference') config.hardwareAcceleration = cfg.hardware;
 
   let supported = false;
   try {
@@ -70,7 +87,7 @@ async function probeOne(codec, timeoutMs) {
   out.supported = supported;
   if (!supported) return out;
 
-  // 关键一步：真的编几帧。
+  // 关键一步：真的编 frames 帧（复用一个画布，够用就行，内容不重要）。
   let encoder = null;
   const started = Date.now();
   try {
@@ -81,9 +98,13 @@ async function probeOne(codec, timeoutMs) {
         error: (e) => reject(e instanceof Error ? e : new Error(String(e?.message || e))),
       });
       encoder.configure(config);
-      for (let i = 0; i < FRAMES; i++) {
-        const frame = makeFrame(Math.round((i * 1e6) / 30));
-        if (!frame) throw new Error('无法创建 VideoFrame（画布不可用）');
+      const canvas = makeCanvas(cfg.width, cfg.height);
+      const g = canvas.getContext('2d');
+      if (!g) throw new Error('无法创建画布');
+      for (let i = 0; i < cfg.frames; i++) {
+        g.fillStyle = i % 2 ? '#3366aa' : '#aa3366';
+        g.fillRect(0, 0, cfg.width, cfg.height);
+        const frame = new VideoFrame(canvas, { timestamp: Math.round((i * 1e6) / fps) });
         encoder.encode(frame, { keyFrame: i === 0 });
         frame.close();
       }
@@ -91,7 +112,7 @@ async function probeOne(codec, timeoutMs) {
     }), timeoutMs);
     out.frames = frames;
   } catch (err) {
-    out.error = err?.code === 'probe-timeout' ? '创建成功但不出帧（超时）' : String(err?.message || err);
+    out.error = err?.code === 'probe-timeout' ? '创建成功但编不出/编不完（超时）' : String(err?.message || err);
   } finally {
     out.ms = Date.now() - started;
     try { encoder?.close?.(); } catch { /* 已经卡死的编码器可能关不掉 */ }
@@ -101,10 +122,20 @@ async function probeOne(codec, timeoutMs) {
 
 /**
  * 并行探测若干编码，返回 [{ codec, label, supported, frames, ms, error }]。
- * 每个编码最多等 timeoutMs；编不出帧就是「说支持但不出帧」。
+ * cfg = { width, height, bitrate, hardware, framerate, frames }；不传时退化成
+ * 320×180 / 3 帧的玩具配置（仅够确认「浏览器有没有 WebCodecs」）。
  */
-export async function probeCodecs({ codecs = ['avc', 'vp9'], timeoutMs = 2500 } = {}) {
-  const list = await Promise.all(codecs.map((c) => probeOne(c, timeoutMs).catch((err) => ({
+export async function probeCodecs({
+  codecs = ['avc', 'vp9'],
+  width = 320, height = 180,
+  bitrate = 1_000_000,
+  hardware = 'no-preference',
+  framerate = 30,
+  frames = 3,
+  timeoutMs = 2500,
+} = {}) {
+  const cfg = { width, height, bitrate, hardware, framerate, frames };
+  const list = await Promise.all(codecs.map((c) => probeOne(c, cfg, timeoutMs).catch((err) => ({
     codec: c, label: CODEC_LABELS[c] || c, supported: false, frames: 0, ms: 0, error: String(err?.message || err),
   }))));
   return list;

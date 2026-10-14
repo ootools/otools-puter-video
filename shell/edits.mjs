@@ -423,9 +423,9 @@ const canSaveLocally = () => hostReady();`,
   {
     file: 'src/ui/export-dialog.js',
     find: "  describeError, formatBytes, safeFileName, renderFrames,\n} from '../engine/exporter.js';",
-    replace: "  describeError, formatBytes, safeFileName, renderFrames, currentExportStage,\n} from '../engine/exporter.js';",
+    replace: "  describeError, formatBytes, safeFileName, renderFrames, currentExportStage, currentExportParams,\n} from '../engine/exporter.js';",
     expect: 1,
-    why: '诊断：从 exporter.js 导入 currentExportStage，卡住时报出停在哪个阶段',
+    why: '诊断：从 exporter.js 导入 currentExportStage / currentExportParams，卡住时报阶段、给探测喂真实参数',
   },
   // 诊断：裸 WebCodecs 编码能力探测（移植层自己的模块，构建时随 shell/src/ 进入 .build/）。
   {
@@ -449,9 +449,22 @@ export function currentExportStage() {
   return exportStage;
 }
 
+/** 当前导出的真实参数（诊断用；编码探测要拿它贴近复现，不能拿玩具配置猜）。 */
+let exportParams = null;
+export function currentExportParams() {
+  return exportParams;
+}
+
 /** Output pixel size: project aspect, short side = resolution, even dimensions. */`,
     expect: 1,
-    why: '导出卡住时要能说出停在哪一步',
+    why: '导出卡住时要能说出停在哪一步，并把真实导出参数交给编码探测',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "  const hw = await canEncodeVideo(s.codec, { width, height, bitrate, frameRate: fps, hardwareAcceleration: 'prefer-hardware' }).catch(() => false);",
+    replace: "  const hw = await canEncodeVideo(s.codec, { width, height, bitrate, frameRate: fps, hardwareAcceleration: 'prefer-hardware' }).catch(() => false);\n  exportParams = { codec: s.codec, width, height, fps, bitrate, hardware: hw };",
+    expect: 1,
+    why: '诊断：记下真实导出的 编码/分辨率/帧率/码率/硬件偏好，供编码探测贴近复现',
   },
   {
     file: 'src/engine/exporter.js',
@@ -661,19 +674,32 @@ export function currentExportStage() {
           ? \`导出卡住：\${codecLabel} 编码在当前环境没有响应（系统编码器在部分环境会静默挂起）。请在导出设置里改用「VP9 / WebM」后重试——VP9 是软件编码，不依赖系统编码器；或降低分辨率、帧率，或改用 GIF 导出。\`
           : '导出卡住：编码一直没有进度。请尝试降低分辨率或帧率、缩短导出范围，或改用 GIF 导出。';
         // 先把明确的报错亮给用户；编码能力用**裸 WebCodecs** 探测确认（绕开渲染、
-        // 绕开 mediabunny，只问浏览器自己能不能真编出几帧），拿到结论后**就地补到报错里**。
+        // 绕开 mediabunny，只问浏览器自己能不能真编出帧），拿到结论后**就地补到报错里**。
         // 探测在后台跑，不阻塞报错显示。
         const lines = [h('p', headline)];
         if (stage) lines.push(h('p', \`卡在「\${stage}」这一步，之后一直没有进度。\`));
         const detail = h('p', '正在探测各编码能否真正出帧…');
         lines.push(detail);
         fail(h('div', ...lines));
-        probeCodecs({ codecs: ['avc', 'vp9'], timeoutMs: 2500 })
-          .then((probes) => {
-            const summary = summarizeProbes(probes);
-            if (summary) detail.textContent = \`编码探测：\${summary}。\`;
+        // 只对视频卡住探测（音频没有视频编码可探）。探测必须按**真实导出参数**跑——
+        // 拿 320×180 编 3 帧会漏掉「1080p 下第 8 帧才卡」这种规模相关挂起、误报可用。
+        // 帧数给到 40，要能跨过那种中途卡死。H.264 编不完→是编码器/GPU 进程（Branch A）；
+        // 编得完→卡的是上面的 mediabunny（Branch B）。
+        if (stallKind === 'video') {
+          const p = currentExportParams() || {};
+          const list = [...new Set([s.codec, 'vp9'])].filter((c) => c);
+          probeCodecs({
+            codecs: list,
+            width: p.width, height: p.height, bitrate: p.bitrate, framerate: p.fps,
+            hardware: p.hardware ? 'prefer-hardware' : 'no-preference',
+            frames: 40, timeoutMs: 4000,
           })
-          .catch(() => {});
+            .then((probes) => {
+              const summary = summarizeProbes(probes);
+              if (summary) detail.textContent = \`按当前导出参数探测（\${p.width || '?'}×\${p.height || '?'}）：\${summary}。\`;
+            })
+            .catch(() => {});
+        }
         return;
       }
       console.error(err);

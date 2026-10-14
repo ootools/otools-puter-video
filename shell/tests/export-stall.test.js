@@ -115,8 +115,10 @@ describe('导出卡 0%', () => {
     expect(d.el.textContent).toContain('导出卡住');
     expect(d.el.textContent).toContain('H.264');
     expect(d.el.textContent).toContain('VP9 / WebM');
-    // 诊断：后台探测结论就地补到报错里（多段报错结构渲染成功）。
-    expect(d.el.textContent).toContain('编码探测：H.264 说支持但不出帧');
+    // 诊断：按真实导出参数的探测结论就地补到报错里（多段报错结构渲染成功）。
+    // 真实参数来自 currentExportParams()，mock 掉 exportProject 时为空→显示 '?×?'。
+    expect(d.el.textContent).toContain('按当前导出参数探测');
+    expect(d.el.textContent).toContain('H.264 说支持但不出帧');
     d.close();
   });
 
