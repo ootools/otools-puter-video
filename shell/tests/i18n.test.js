@@ -191,6 +191,87 @@ describe('the user override', () => {
   });
 });
 
+describe('patterns for strings the source builds with interpolation', () => {
+  /* 这些文案上游用模板串拼出来，永远不可能成为词典的键，只能按形状认。 */
+
+  it('translates relative time', async () => {
+    const { t, setPreference } = await freshI18n();
+    setPreference('zh-CN');
+    expect(t('Just now')).toBe('刚刚');
+    expect(t('5 min ago')).toBe('5 分钟前');
+    expect(t('2 hours ago')).toBe('2 小时前');
+    expect(t('1 hour ago')).toBe('1 小时前');
+  });
+
+  it('translates the project card readout', async () => {
+    const { t, setPreference } = await freshI18n();
+    setPreference('zh-CN');
+    // `${clock}  ·  ${relTime}`：时长是数据，时间要翻
+    expect(t('0:10  ·  2 min ago')).toBe('0:10  ·  2 分钟前');
+    // relTime 的兜底分支是 toLocaleDateString 的日期串，已经本地化过，整条别动
+    expect(t('03:20  ·  Oct 14, 2026')).toBe('03:20  ·  Oct 14, 2026');
+  });
+
+  it('translates the Trash card readout and keeps the project name', async () => {
+    const { t, setPreference } = await freshI18n();
+    setPreference('zh-CN');
+    expect(t('Deleted 3 min ago  ·  29 days left')).toBe('已删除 3 分钟前  ·  还剩 29 天');
+    // 项目名是用户数据，一个字符都不能动
+    expect(t('Open Holiday cut, 0:04, edited 2 hours ago')).toBe('打开 Holiday cut（0:04，编辑于 2 小时前）');
+    expect(t('More actions for Holiday cut')).toBe('Holiday cut 的更多操作');
+  });
+
+  it('keeps user data and translates the chrome around it', async () => {
+    const { t, setPreference } = await freshI18n();
+    setPreference('zh-CN');
+    expect(t('Add clip.mp4 to timeline')).toBe('把 clip.mp4 添加到时间线');
+    expect(t('Back  ·  editing My compound')).toBe('返回  ·  正在编辑 My compound');
+    expect(t('Restore Old cut')).toBe('还原 Old cut');
+    expect(t('Delete Old cut forever')).toBe('永久删除 Old cut');
+  });
+
+  it('translates a control name only when the name itself is known', async () => {
+    const { t, setPreference } = await freshI18n();
+    setPreference('zh-CN');
+    // 'Reset color' 是词典里的完整词条，走精确匹配
+    expect(t('Reset color')).toBe('重置颜色');
+    // 模式里的捕获组要是词典里没有的控件名，整条放弃——宁可露英文，
+    // 也不拼出「重置 Reset all」这种半截中文
+    expect(t('Reset some widget we never translated')).toBe('Reset some widget we never translated');
+    expect(t('Add a widget we never translated')).toBe('Add a widget we never translated');
+  });
+
+  it('splits composite readouts and only commits when every part translates', async () => {
+    const { t, setPreference } = await freshI18n();
+    setPreference('zh-CN');
+    expect(t('2 projects  ·  1 in Trash')).toBe('2 个项目  ·  回收站 1 个');
+    expect(t('Social  ·  00:08')).toBe('社交  ·  00:08');
+    // 有一段翻不出来就整条放弃：这条看起来像用户自己用 · 拼的名字
+    expect(t('Holiday  ·  beach  ·  sky')).toBe('Holiday  ·  beach  ·  sky');
+  });
+
+  it('prefers an exact dictionary entry over a pattern', async () => {
+    const { t, setPreference } = await freshI18n();
+    setPreference('zh-CN');
+    // 'Add to timeline' 是完整词条；`^Add (.+) to timeline$` 这条模式不该抢在前面
+    expect(t('Add to timeline')).toBe('添加到时间线');
+    expect(t('Delete clip')).toBe('删除片段');
+  });
+
+  it('returns the source language when nothing applies', async () => {
+    const { t, setPreference } = await freshI18n();
+    setPreference('en-US');
+    expect(t('5 min ago')).toBe('5 min ago');
+    expect(t('2 projects  ·  1 in Trash')).toBe('2 projects  ·  1 in Trash');
+  });
+
+  it('reports how many patterns there are', async () => {
+    const { setPreference, patternSize } = await freshI18n();
+    setPreference('zh-CN');
+    expect(patternSize()).toBeGreaterThan(40);
+  });
+});
+
 describe('what it writes on the document', () => {
   it('keeps lang in step with what is actually shown', async () => {
     const i18n = await freshI18n();

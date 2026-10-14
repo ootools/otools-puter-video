@@ -22,9 +22,13 @@
  *
  * 词典见 `i18n.zh-CN.js`。没有词典的语言（宿主支持 8 种，我们目前提供
  * 简体中文一种译文）回退到英文原文——上游本来就是英文界面，回退是安全的。
+ *
+ * 翻译分两层（见 `t()`）：**精确词条** + **模式**。模式是为了那些上游用
+ * 模板串拼出来的文案（`Add ${x} to timeline`、`Open ${name}, edited ${rel}`），
+ * 它们永远不可能成为词典的键，只能按形状认。
  */
 
-import zhCN from './i18n.zh-CN.js';
+import zhCN, { patterns as zhCNPatterns } from './i18n.zh-CN.js';
 
 /** 用户选择的语言；'auto' = 跟随宿主。 */
 const PREF_KEY = 'otools-video.locale';
@@ -47,11 +51,29 @@ const LOCALE_LABELS = {
 /** 已注册的词典：locale -> { 英文原文: 译文 }。 */
 const catalogs = new Map();
 
+/**
+ * 模式表：locale -> [[锚定正则, 替换], …]。
+ *
+ * 上游有大量文案是**模板串拼出来的**，精确匹配永远命中不了：
+ *
+ *     `Open ${p.name}, ${clock(p.duration)}, edited ${relTime(p.modified)}`
+ *     `${clock(p.duration)}  ·  ${relTime(p.modified)}`
+ *     `Add ${item.label} to timeline`
+ *     `Back  ·  editing ${store.compoundName}`
+ *
+ * 这些只能按形状去认。替换可以是字符串（`$1` 引用捕获组）或函数
+ * `(match, t) => string`——函数形式是为了能区分「捕获组是用户数据」
+ * 与「捕获组是界面文案」，后者要递归再翻一次。
+ */
+const patternSets = new Map();
+
 /** 已注册但不需要词典（英文就是原文）的语言。 */
 const passthrough = new Set([SOURCE_LOCALE]);
 
-export function registerCatalog(locale, messages) {
+export function registerCatalog(locale, messages, patterns = []) {
   catalogs.set(locale, messages);
+  if (patterns.length) patternSets.set(locale, patterns);
+  else patternSets.delete(locale);
   passthrough.delete(locale);
   resolve();
 }
@@ -65,7 +87,7 @@ let ourLang = '';
 const listeners = new Set();
 
 // 内置词典要在状态声明之后注册：registerCatalog 会立刻 resolve 一次。
-registerCatalog('zh-CN', zhCN);
+registerCatalog('zh-CN', zhCN, zhCNPatterns);
 
 function readPref() {
   try {
@@ -154,6 +176,13 @@ export function localeOptionPairs() {
 /**
  * 查一条译文。
  *
+ * 两步：
+ *   1. **精确命中**词典（绝大多数界面文案走这条）；
+ *   2. 没命中就试**模式**——带插值的模板串只能按形状认。
+ *
+ * 两步都不中时返回原文。上游本来就是英文界面，回退是安全的：
+ * 露英文比露 key 好，也比把用户自己起的名字改掉好。
+ *
  * @param {string} key 英文原文
  * @param {Record<string, unknown>} [params] 替换译文里的 `{name}` 占位
  * @returns {string} 译文；没有词典或没有这条词时返回 key 本身
@@ -162,21 +191,47 @@ export function t(key, params) {
   const source = String(key ?? '');
   if (!source) return source;
   const catalog = catalogs.get(current);
-  const hit = catalog && Object.prototype.hasOwnProperty.call(catalog, source) ? catalog[source] : source;
+  let hit;
+  if (catalog && Object.prototype.hasOwnProperty.call(catalog, source)) hit = catalog[source];
+  else hit = applyPatterns(source) ?? source;
   if (!params) return hit;
   return hit.replace(/\{(\w+)\}/g, (all, name) => (name in params ? String(params[name]) : all));
 }
 
-/** 这条原文有没有译文（报告与调试用）。 */
+/** 按当前语言的模式表试一遍，命中返回译文，没命中返回 null。 */
+function applyPatterns(source) {
+  const patterns = patternSets.get(current);
+  if (!patterns) return null;
+  for (const entry of patterns) {
+    const re = entry[0];
+    // 模式一律是锚定的、不带 g 的；带 g 会让 lastIndex 在调用间残留。
+    if (re.global || re.sticky) re.lastIndex = 0;
+    const match = re.exec(source);
+    if (!match) continue;
+    const replace = entry[1];
+    const out = typeof replace === 'function' ? replace(match, t) : source.replace(re, replace);
+    // 替换结果为空串视为「不处理」：写错模式不该把界面文案抹掉。
+    if (typeof out === 'string' && out) return out;
+  }
+  return null;
+}
+
+/** 这条原文有没有译文（精确或模式命中都算）。报告与调试用。 */
 export function has(key) {
   const catalog = catalogs.get(current);
-  return Boolean(catalog && Object.prototype.hasOwnProperty.call(catalog, key));
+  if (catalog && Object.prototype.hasOwnProperty.call(catalog, key)) return true;
+  return applyPatterns(String(key ?? '')) !== null;
 }
 
 /** 当前词典的条目数。 */
 export function catalogSize(value = current) {
   const catalog = catalogs.get(value);
   return catalog ? Object.keys(catalog).length : 0;
+}
+
+/** 当前语言的模式条数。 */
+export function patternSize(value = current) {
+  return patternSets.get(value)?.length ?? 0;
 }
 
 /* ------------------------------------------------------------ 变更通知 */

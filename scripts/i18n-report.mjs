@@ -33,7 +33,15 @@ const arg = (name) => {
   return i >= 0 ? process.argv[i + 1] : null;
 };
 
-/** 抽出来的字面量里，这些明显不是界面文案，直接丢。 */
+/**
+ * 抽出来的字面量里，这些明显不是界面文案，直接丢。
+ *
+ * 注意**不要**简单地「丢掉所有单个词」：界面上一大半是单词标签
+ * （`Restore`、`Player`、`Details`、`Ratio`、`Mirror`…）。当初用
+ * `/^[\w-]+$/` 一刀切，结果面板标签页名、字段名、按钮名整类都不在
+ * 报告里——覆盖率看着很高，屏幕上却一直是英文。
+ * 要丢的是**标识符形状**的词：camelCase、全小写、全大写、带点或下划线。
+ */
 const NOT_UI = [
   /^[.#][\w.\-:[\]="' >+~,()]*$/, // CSS 选择器
   /^[a-z0-9]+(?:[A-Z][a-z0-9]*)+$/, // camelCase 标识符
@@ -45,22 +53,41 @@ const NOT_UI = [
   /^[\w.-]+\.(?:js|json|css|png|svg|mp4|mp3|wav|cube|tflite|task|wasm|txt)$/,
   /^\d/,
   /[{}<>=;|&$]/, // 代码片段
-  /^[\w-]+$/, // 单个无空格 token（大多是 class / 枚举 / 字体名）
+  /^[\w-]*[._][\w-]*$/, // 带点或下划线的单个 token（文件名 / id / class）
 ];
 
-/** 只在「像界面文案」的上下文里抽。每条规则给出：正则 + 取哪一组。 */
+/**
+ * 只在「像界面文案」的上下文里抽。每条规则给出：正则 + 取哪一组。
+ *
+ * 这里的规则就是**缺口清单的可信度上限**：漏掉一种调用形状，那一整类文案
+ * 就永远不会出现在报告里（曾经漏掉 `store.update('Add track', …)` 与
+ * `.edit('Reset color', …)`——它们会出现在历史面板和撤销提示里，是真正
+ * 看得见的界面文案，132 条就这样一直没人发现）。
+ * 所以要往里加的是**新的调用形状**，不是新的文案。
+ */
 const CONTEXT_RULES = [
-  // 菜单 / 字段 / 按钮：{ label: '…' }、title: '…'、'aria-label': '…'、data-tip: '…'
-  { re: /(?:^|[\s{,(])(?:label|title|heading|hint|note|description|placeholder|text|okLabel|cancelLabel|confirm|cancel|ok|tip|unit|why|reason)\s*:\s*(['"])((?:[^'"\\\n]|\\.){2,90})\1/g, group: 2 },
-  { re: /['"](?:aria-label|data-tip|aria-labelledby|aria-describedby)['"]\s*:\s*(['"])((?:[^'"\\\n]|\\.){2,90})\1/g, group: 2 },
-  // h('div.cls', {…}, '文本')
-  { re: /\bh\(\s*(['"])[^'"]*\1\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,90})\2/g, group: 3 },
+  // 属性表里的展示字段：{ label: '…' }、title: '…'、'aria-label': '…'、data-tip: '…'
+  { re: /(?:^|[\s{,(])(?:label|title|heading|hint|note|description|placeholder|text|okLabel|cancelLabel|confirm|cancel|ok|tip|unit|why|reason|message|empty|sub|body|summary)\s*:\s*(['"])((?:[^'"\\\n]|\\.){2,140})\1/g, group: 2 },
+  { re: /['"](?:aria-label|data-tip|aria-labelledby|aria-describedby)['"]\s*:\s*(['"])((?:[^'"\\\n]|\\.){2,140})\1/g, group: 2 },
+  // h('div.cls', {…}, '文本') / h('div.cls', '文本')
+  { re: /\bh\(\s*(['"])[^'"]*\1\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,140})\2/g, group: 3 },
+  { re: /\bh\(\s*(['"])[^'"]*\1\s*,\s*\{[^{}]*\}\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,140})\2/g, group: 3 },
   // emptyState('icon', '标题', '正文')
-  { re: /\bemptyState\(\s*(['"])[^'"]*\1\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,90})\2/g, group: 3 },
-  // .textContent = '文本' / announce('文本') / toast('文本'
-  { re: /\.textContent\s*=\s*(['"])((?:[^'"\\\n]|\\.){3,90})\1/g, group: 2 },
-  { re: /\bannounce\(\s*(['"])((?:[^'"\\\n]|\\.){3,90})\1/g, group: 2 },
-  { re: /\btoast\(\s*(['"])((?:[^'"\\\n]|\\.){3,120})\1/g, group: 2 },
+  { re: /\bemptyState\(\s*(['"])[^'"]*\1\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,140})\2/g, group: 3 },
+  // .textContent = '文本'
+  { re: /\.textContent\s*=\s*(['"])((?:[^'"\\\n]|\\.){3,140})\1/g, group: 2 },
+  // 会直接显示给用户的调用：announce / toast / note / done / progress
+  { re: /\b(?:announce|toast|note|done|progress|promptDialog|confirmDialog)\(\s*(['"])((?:[^'"\\\n]|\\.){3,140})\1/g, group: 2 },
+  // fail('kind', '文案')：第二个参数才是文案
+  { re: /\bfail\(\s*(['"])[^'"]*\1\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,140})\2/g, group: 3 },
+  // 进度条文本：p.set(0.5, 'Matching …') / progress('Packing …', …)
+  { re: /\b[a-zA-Z_$][\w$]*\.set\([^,()]*,\s*(['"])((?:[^'"\\\n]|\\.){3,140})\1/g, group: 2 },
+  // 历史 / 编辑动作的标签：store.update('Add track', …)、view.edit('Reset color', …)
+  // 这些会出现在历史面板条目与撤销/重做的悬停提示里。
+  { re: /\b(?:update|edit)\(\s*(['"])((?:[^'"\\\n]|\\.){2,140})\1/g, group: 2 },
+  { re: /\.undoStack\.push\(\s*\{[^}]*\blabel\s*:\s*(['"])((?:[^'"\\\n]|\\.){2,140})\1/g, group: 2 },
+  // 抛给用户的错误文案（上游把它们显示在错误页 / toast 里）
+  { re: /\bnew Error\(\s*(['"])((?:[^'"\\\n]|\\.){3,160})\1/g, group: 2 },
 ];
 
 function walk(dir, out = []) {

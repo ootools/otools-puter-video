@@ -33,11 +33,15 @@ export function hostMessage(err) {
 
 /**
  * 弹宿主另存对话框并写盘。
+ *
+ * `title` 是原生对话框的标题，走宿主渲染、**不在 DOM 里**，DOM 翻译层管不到，
+ * 所以这里自己翻——调用方一律传英文原文（相当于一个 key）。
+ *
  * @returns {Promise<string|null>} 落盘路径；用户在对话框里取消时 null。
  */
-export async function saveBlobAs(blob, fileName, { title = t('Save as'), filters } = {}) {
+export async function saveBlobAs(blob, fileName, { title = 'Save as', filters } = {}) {
   if (!hostReady()) return null;
-  const path = await host.pickSavePath({ title, defaultPath: fileName, filters });
+  const path = await host.pickSavePath({ title: t(title), defaultPath: fileName, filters });
   if (!path) return null;
   await host.writeBlob(path, blob);
   return path;

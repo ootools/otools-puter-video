@@ -7,19 +7,24 @@
  *
  * 做法与边界：
  *
- *   - **只做精确匹配**。文本节点去掉首尾空白后必须与词典的键逐字符相同才替换。
- *     没有模糊匹配、没有子串替换——所以动态拼接的文案（`Undo 移动片段`、
- *     `Saved to C:\…`）不会被误伤，用户自己起的名字也不会被改写。
- *   - **用户内容区整棵子树跳过**（时间线片段名、素材文件名、项目名、字幕正文…），
- *     见 SKIP_SELECTORS。跳过是在遍历时剪枝，不是逐节点回溯祖先。
+ *   - **只做精确匹配**（外加 `i18n.js` 里的锚定模式）。文本节点去掉首尾空白后
+ *     必须与词典的键逐字符相同、或者整条匹配某条模式，才替换。
+ *     没有模糊匹配、没有子串替换——所以用户自己起的名字不会被改写。
+ *   - **用户内容区整棵子树跳过**（项目名、素材文件名、片段名、字幕正文…），
+ *     见 SKIP_SELECTORS。**只跳叶子**：早先这里写了 `.project-card`、`.tpl-card`
+ *     这种容器选择器，结果是卡片里的「移入回收站」按钮、副标题一起被跳过，
+ *     界面上一直留着英文。同理，**我们自己目录里的名字**（特效名、转场名、
+ *     滤镜名、音效名、模板名、属性名）不是用户内容，必须翻译——它们本来就是
+ *     词典的条目，之前被误跳过了。
  *   - **只碰文本与几个展示属性**（title / aria-label / placeholder / data-tip / alt），
  *     不碰表单值、不碰 canvas、不碰 svg。
  *   - 记下每个节点/属性的**原文**，所以切语言时重译是幂等的，不会中文套中文。
  *   - MutationObserver 跟新增节点，按帧批处理；自己的写入不会触发二次写入
  *     （写完 nodeValue 已经等于目标值，下一轮算出来还是同一个值，自然收敛）。
+ *   - `document.title` 上游是单独赋值的，不在 body 里，另外接一下。
  *
- * 覆盖率：`node scripts/i18n-report.mjs`。没翻到的原文保持英文显示——
- * 这是刻意的：露英文比露 key 好。
+ * 覆盖率：`node scripts/i18n-crawl.mjs`（在 jsdom 里真挂界面，看屏幕上还剩什么
+ * 英文）。没翻到的原文保持英文显示——这是刻意的：露英文比露 key 好。
  */
 
 import { t, onChange, locale, SOURCE_LOCALE } from './i18n.js';
@@ -31,24 +36,37 @@ const SKIP_TAGS = new Set([
 ]);
 
 /**
- * 用户内容区：这些容器里放的是用户自己的文字（片段名、文件名、项目名、
+ * 用户内容区：这些容器里放的是**用户自己的文字**（项目名、文件名、片段名、
  * 字幕正文、轨道名…），翻译它们等于改用户的数据。
+ *
+ * 两条纪律：
+ *   1. **只写叶子节点，不写容器**。写 `.project-card` 会把卡片里的按钮一起
+ *      跳过——那是界面文案，必须翻。
+ *   2. **不是用户写的就不进来**。特效名、转场名、滤镜名、音效名、模板名、
+ *      属性名都来自我们自己的目录（`model/catalog.js` 等），它们本来就是
+ *      词典的条目；跳过等于界面上永远留着英文。
  */
 const SKIP_SELECTORS = [
   '[contenteditable]',
   '[data-i18n-skip]',
   '#vs-i18n-skip',
-  // 时间线
-  '.tl-clip', '.clip-name', '.clip-type', '.clip-dur', '.tl-cover', '.tl-header-name',
-  // 素材与项目
-  '.asset-name', '.asset-group-title', '.media-row-name', '.missing-name',
-  '.project-card', '.project-name', '.tpl-card', '.tpl-name',
-  // 字幕与文本
-  '.cap-text', '.tp-text', '.mask-text-input', '.insp-textarea',
-  // 各种用户命名
-  '.kf-name', '.mask-row-name', '.mc-card-name', '.mc-cut-name', '.nest-label',
-  '.look-name', '.sfx-name', '.tr-name', '.applied-filter-name', '.clipfx-name',
+  // 用户输入的文本框
+  '.insp-textarea',
+  '.mask-text-input',
+  // 项目名（首页卡片标题、顶栏那个可点的名字）
+  '.project-title',
+  '.project-name',
+  // 素材与文件夹名
+  '.media-row-name',
+  '.missing-name',
+  // 时间线片段名（用户起的名 / 文本片段的内容 / 素材名）
+  '.clip-name',
+  // 字幕正文与提词器正文
+  '.cap-text',
+  '.tp-text',
+  // 用户命名的轨道与多机位角度
   '.player-timeline-name',
+  '.mc-card-name',
 ];
 
 /** 需要一起翻译的展示属性。 */
@@ -63,7 +81,18 @@ let enabled = true;
 let scheduled = false;
 const pending = new Set();
 const stats = { nodes: 0, attributes: 0, passes: 0 };
-const misses = new Set();
+
+/**
+ * 没翻到的原文：`原文 -> { text, attr }`。
+ *
+ * 分开计数是有用的：属性（title/aria-label）漏了只影响读屏与悬停提示，
+ * 文本漏了是**屏幕上直接看得见的英文**——排查时先看 text。
+ */
+const misses = new Map();
+
+/** `document.title` 的原文与我们最后写进去的值。 */
+let titleOriginal = '';
+let titleWritten = '';
 
 /**
  * 已安装的观察器挂在 globalThis 上，而不是模块作用域。
@@ -102,8 +131,11 @@ function insideSkipped(node) {
 }
 
 /** 记下没翻到的原文（只在有词典的语言下记，英文模式下整棵树都是「没翻到」）。 */
-function noteMiss(original) {
-  if (locale() !== SOURCE_LOCALE) misses.add(original);
+function noteMiss(original, kind) {
+  if (locale() === SOURCE_LOCALE) return;
+  const row = misses.get(original) || { text: 0, attr: 0 };
+  row[kind] += 1;
+  misses.set(original, row);
 }
 
 /** 保留首尾空白地替换文本。调用方保证这个节点不在跳过区里。 */
@@ -119,7 +151,7 @@ function translateTextNode(node) {
     textOriginals.set(node, original);
   }
   const want = t(original);
-  if (want === original) noteMiss(original);
+  if (want === original) noteMiss(original, 'text');
   // 注意：要拿 `want` 去和**当前**节点值比，而不是和原文比。
   // 切回原文语言时 want === original，此时正是要把译文还原回英文——
   // 早退就会留下中文。
@@ -151,7 +183,7 @@ function translateAttributes(el) {
       map.set(attr, original);
     }
     const want = t(original);
-    if (want === original) noteMiss(original);
+    if (want === original) noteMiss(original, 'attr');
     // 同 translateTextNode：和当前值比，才能在切回原文语言时还原
     if (raw !== want) {
       el.setAttribute(attr, want);
@@ -183,6 +215,29 @@ function translateNode(node) {
 
 /* -------------------------------------------------------------- 调度 */
 
+/**
+ * `document.title`。
+ *
+ * 上游是 `document.title = \`${name} - Video Studio\`` 这样单独赋值的，
+ * 不在 body 里，翻译层看不到。做法是「发现和我们上次写的不一样，就当作
+ * 上游又改了一次，重新按原文翻」。幂等，且不会和上游打架。
+ */
+function syncTitle() {
+  if (typeof document === 'undefined') return;
+  const raw = document.title || '';
+  if (!raw) {
+    titleOriginal = '';
+    titleWritten = '';
+    return;
+  }
+  if (raw === titleWritten) return;
+  titleOriginal = raw;
+  const want = t(titleOriginal);
+  if (want === titleOriginal) noteMiss(titleOriginal, 'attr');
+  titleWritten = want;
+  if (want !== raw) document.title = want;
+}
+
 function flush() {
   scheduled = false;
   stats.passes += 1;
@@ -190,6 +245,7 @@ function flush() {
     if (node.isConnected) translateNode(node);
   }
   pending.clear();
+  syncTitle();
 }
 
 function schedule(node) {
@@ -221,7 +277,24 @@ function onMutations(records) {
 
 /** 当前语言下没翻到的原文（调试与报告用）。 */
 export function missingStrings() {
-  return [...misses].sort();
+  return [...misses.keys()].sort();
+}
+
+/**
+ * 没翻到的原文，带「是文本还是属性」的计数。
+ * 爬虫（`scripts/i18n-crawl.mjs`）用这个把缺口按屏幕列出来。
+ *
+ * @returns {Array<{key: string, text: number, attr: number}>}
+ */
+export function missingReport() {
+  return [...misses]
+    .map(([key, row]) => ({ key, text: row.text, attr: row.attr }))
+    .sort((a, b) => b.text - a.text || b.attr - a.attr || a.key.localeCompare(b.key));
+}
+
+/** 清空漏译记录（爬虫在切换屏幕之间调，好把缺口归到具体屏幕上）。 */
+export function resetMisses() {
+  misses.clear();
 }
 
 export function domStats() {
@@ -235,9 +308,12 @@ export function setEnabled(value) {
 
 /** 全量重译。切语言后调用；因为记着原文，重译是幂等的。 */
 export function translateAll() {
-  if (!enabled || typeof document === 'undefined' || !document.body) return;
+  if (!enabled || typeof document === 'undefined' || !document.documentElement) return;
   pending.clear();
-  translateNode(document.body);
+  // 切语言时上游可能已经改过标题：忘掉上次写进去的值，重新按原文翻。
+  titleWritten = '';
+  translateNode(document.documentElement);
+  syncTitle();
 }
 
 export function disposeDomTranslation() {
@@ -249,14 +325,19 @@ export function disposeDomTranslation() {
 /**
  * 装上翻译层。幂等（跨模块实例也幂等）。
  *
- * @param {{root?: Element}} [options] 只翻译这个根（默认 document.body）
+ * 默认挂在 `documentElement` 而不是 `body`：`<title>` 在 head 里，上游改
+ * 标题时只有观察整个文档才能收到通知（`<title>` 本身在 SKIP_TAGS 里，
+ * 不会被动到）。
+ *
+ * @param {{root?: Element}} [options] 只翻译这个根（默认 documentElement）
  */
 export function installDomTranslation({ root } = {}) {
   if (typeof document === 'undefined' || REGISTRY.size) return;
-  const target = root || document.body;
+  const target = root || document.documentElement;
   if (!target) return;
 
   translateNode(target);
+  syncTitle();
 
   if (typeof MutationObserver === 'function') {
     observer = new MutationObserver(onMutations);

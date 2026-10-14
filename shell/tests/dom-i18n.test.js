@@ -100,22 +100,94 @@ describe('what it refuses to touch', () => {
     await setup();
     document.body.innerHTML = [
       '<div class="clip-name">Cancel</div>',
-      '<div class="asset-name">Delete</div>',
+      '<div class="media-row-name">Delete</div>',
       '<div class="project-name">Zoom in</div>',
+      '<div class="project-title">Zoom in</div>',
       '<div class="cap-text">Save</div>',
-      '<div class="tl-clip"><span>Cancel</span></div>',
+      '<div class="tp-text">Save</div>',
       '<div contenteditable="true">Cancel</div>',
       '<div data-i18n-skip>Cancel</div>',
     ].join('');
     const dom = await import('../src/otools/dom-i18n.js');
     dom.translateAll();
     expect(document.body.querySelector('.clip-name').textContent).toBe('Cancel');
-    expect(document.body.querySelector('.asset-name').textContent).toBe('Delete');
+    expect(document.body.querySelector('.media-row-name').textContent).toBe('Delete');
     expect(document.body.querySelector('.project-name').textContent).toBe('Zoom in');
+    expect(document.body.querySelector('.project-title').textContent).toBe('Zoom in');
     expect(document.body.querySelector('.cap-text').textContent).toBe('Save');
-    expect(document.body.querySelector('.tl-clip span').textContent).toBe('Cancel');
+    expect(document.body.querySelector('.tp-text').textContent).toBe('Save');
     expect(document.body.querySelector('[contenteditable]').textContent).toBe('Cancel');
     expect(document.body.querySelector('[data-i18n-skip]').textContent).toBe('Cancel');
+  });
+
+  /*
+   * 这里修的是一个真 bug。
+   *
+   * SKIP_SELECTORS 早先写着 `.project-card`、`.tpl-card`、`.tl-clip`、
+   * `.nest-label`、`.asset-group-title` 这些**容器**选择器，整棵子树都跳过。
+   * 于是项目卡片里的「移入回收站」按钮、模板卡片的分类行、时间线片段的
+   * 悬停提示一起都不翻了——界面上长期留着英文，而覆盖率报告显示 95%。
+   *
+   * 现在跳过只针对**叶子**级的用户内容；容器一律不跳过。
+   */
+  it('does not skip whole containers, so the chrome inside them still translates', async () => {
+    await setup();
+    document.body.innerHTML = [
+      '<div class="project-card"><button class="trash-action">Move to Trash</button></div>',
+      '<div class="tpl-card"><span class="tpl-sub">Social  ·  00:08</span></div>',
+      '<div class="tl-clip"><span class="clip-badge" title="Grouped"> </span><span class="clip-name">Cancel</span></div>',
+      '<div class="nest-label">Back  ·  editing Scene 1</div>',
+    ].join('');
+    const dom = await import('../src/otools/dom-i18n.js');
+    dom.translateAll();
+    expect(document.body.querySelector('.trash-action').textContent).toBe('移入回收站');
+    expect(document.body.querySelector('.tpl-sub').textContent).toBe('社交  ·  00:08');
+    // 标题属性跟着翻，但片段名字是用户的，一个字不动
+    expect(document.body.querySelector('.clip-badge').getAttribute('title')).toBe('已编组');
+    expect(document.body.querySelector('.clip-name').textContent).toBe('Cancel');
+    expect(document.body.querySelector('.nest-label').textContent).toBe('返回  ·  正在编辑 Scene 1');
+  });
+
+  /*
+   * 我们目录里的名字（特效、转场、滤镜、音效、模板分类、属性名）**不是**
+   * 用户内容——它们本来就是词典里的条目。跳过它们等于界面上永远留着英文：
+   * 素材面板的分区标题、检查器里的已应用滤镜、虚拟主播面板的四个分区，
+   * 全都是英文。这个用例把这件事钉住。
+   */
+  it('translates our own catalog labels, which are not user content', async () => {
+    await setup();
+    document.body.innerHTML = [
+      '<h3 class="asset-group-title">Retro</h3>',
+      '<span class="applied-filter-name">Vintage</span>',
+      '<span class="tr-name">Dissolve</span>',
+      '<span class="clipfx-name">Glitch</span>',
+      '<span class="look-name">Soft glow</span>',
+      '<span class="sfx-name">Applause</span>',
+      '<span class="kf-name">Position</span>',
+      '<span class="tpl-name">Title intro</span>',
+    ].join('');
+    const dom = await import('../src/otools/dom-i18n.js');
+    dom.translateAll();
+    expect(document.body.querySelector('.asset-group-title').textContent).toBe('复古');
+    expect(document.body.querySelector('.applied-filter-name').textContent).toBe('复古');
+    expect(document.body.querySelector('.tr-name').textContent).toBe('叠化');
+    expect(document.body.querySelector('.clipfx-name').textContent).toBe('故障');
+    expect(document.body.querySelector('.look-name').textContent).toBe('柔光');
+    expect(document.body.querySelector('.sfx-name').textContent).toBe('掌声');
+    expect(document.body.querySelector('.kf-name').textContent).toBe('位置');
+    expect(document.body.querySelector('.tpl-name').textContent).toBe('标题开场');
+  });
+
+  it('translates the document title, which upstream assigns directly', async () => {
+    await setup();
+    document.title = 'My cut - Video Studio editor';
+    const dom = await import('../src/otools/dom-i18n.js');
+    dom.translateAll();
+    expect(document.title).toBe('My cut - 视频工作室编辑器');
+    // 上游再改一次标题：跟着新的原文重翻，不会把上一次的译文记成原文
+    document.title = 'Other cut - Video Studio editor';
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(document.title).toBe('Other cut - 视频工作室编辑器');
   });
 
   it('skips tags whose text is not interface copy', async () => {
