@@ -15,7 +15,7 @@
  */
 import {
   available, channel, env, knownPath, joinPath, createDir, removeEntry,
-  writeFile, readFile, base64ToBlob, invokeNative, diag,
+  writeFile, readFile, base64ToBlob, bytesToBase64, invokeNative, diag,
 } from './host.js';
 
 /** 进程内缓存探测结果（null=还没探）。H.264 导入只会稳定地「可用/不可用」。 */
@@ -116,10 +116,32 @@ async function makeScratchDir(label) {
   return dir;
 }
 
-function canvasToJpegBase64(canvas, quality) {
-  const url = canvas.toDataURL('image/jpeg', quality);
-  const comma = url.indexOf(',');
-  return comma >= 0 ? url.slice(comma + 1) : '';
+/**
+ * 把帧画布编码成 JPEG 的 base64，准备落盘给 ffmpeg。
+ *
+ * 关键坑：上游的 `makeCanvas()` 在 webview（WKWebView 永远有 OffscreenCanvas）里
+ * 默认产出 **OffscreenCanvas**，而 OffscreenCanvas **没有 `toDataURL()`**，只能
+ * `convertToBlob()`。所以这里两条路都走：
+ *   - OffscreenCanvas → convertToBlob → arrayBuffer → base64
+ *   - 普通 HTMLCanvasElement → toDataURL（jsdom 测试里就是这个）
+ * 任一条失败都返回空串，由调用方抛「无法把帧编码成 JPEG」。
+ */
+async function canvasToJpegBase64(canvas, quality) {
+  if (!canvas) return '';
+  if (typeof canvas.convertToBlob === 'function') {
+    try {
+      const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
+      return bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
+    } catch {
+      return '';
+    }
+  }
+  if (typeof canvas.toDataURL === 'function') {
+    const url = canvas.toDataURL('image/jpeg', quality);
+    const comma = url.indexOf(',');
+    return comma >= 0 ? url.slice(comma + 1) : '';
+  }
+  return '';
 }
 
 const pad = (n, w) => String(n).padStart(w, '0');
@@ -157,7 +179,7 @@ export async function exportVideoNativeH264({
     for (let i = 0; i < total; i++) {
       if (signal?.aborted) throw Object.assign(new Error('Aborted'), { name: 'AbortError' });
       const canvas = await renderFrame(i);
-      const base64 = canvasToJpegBase64(canvas, 0.95);
+      const base64 = await canvasToJpegBase64(canvas, 0.95);
       if (!base64) throw new Error('无法把帧编码成 JPEG');
       await writeFile(await joinPath(framesDir, `${pad(i + 1, 6)}.jpg`), base64);
       const now = performance.now();

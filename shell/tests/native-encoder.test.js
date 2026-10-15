@@ -32,6 +32,7 @@ vi.mock('../src/otools/host.js', () => {
     writeFile: async (path) => { mock.writes.push(path); },
     readFile: async (path) => ({ path, dataBase64: 'QUFB' }),
     base64ToBlob: (b64, mime) => ({ __blob: true, mime, b64 }),
+    bytesToBase64: (bytes) => 'QUJD',
     diag: () => {},
     invokeNative: async (method, payload) => {
       if (mock.invokeThrows) throw new Error('native 调用失败');
@@ -51,6 +52,13 @@ const { nativeH264Available, exportVideoNativeH264, nativeH264Reason, installFfm
 const mock = host.__mock;
 
 const fakeCanvas = () => ({ toDataURL: () => 'data:image/jpeg;base64,QUFBQg==' });
+
+// 上游 makeCanvas 在 WKWebView 里产出 OffscreenCanvas——它没有 toDataURL，
+// 只能 convertToBlob。这条路径必须也能落帧，否则真机报「e.toDataURL is not a function」。
+const fakeOffscreenCanvas = () => ({
+  width: 100, height: 100,
+  convertToBlob: async () => ({ arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]) }),
+});
 
 beforeEach(() => {
   _resetNativeH264Availability();
@@ -126,6 +134,21 @@ describe('exportVideoNativeH264', () => {
     expect(seen.length).toBeGreaterThan(0);
     expect(seen[seen.length - 1].phase).toBe('finalizing');
     // 临时目录用完即删。
+    expect(mock.removed).toHaveLength(1);
+  });
+
+  it('OffscreenCanvas（无 toDataURL）也能落帧：走 convertToBlob', async () => {
+    const result = await exportVideoNativeH264({
+      width: 640, height: 360, fps: 30, bitrate: 4_000_000,
+      total: 3, duration: 0.1, name: 'off',
+      onProgress: () => {},
+      renderFrame: async () => fakeOffscreenCanvas(),
+    });
+    // 帧照常写成 3 个 jpg；编码调用带真实参数。
+    expect(mock.writes).toHaveLength(3);
+    expect(mock.writes[0]).toMatch(/\/frames\/000001\.jpg$/);
+    expect(mock.encodes).toHaveLength(1);
+    expect(result.mimeType).toBe('video/mp4');
     expect(mock.removed).toHaveLength(1);
   });
 
