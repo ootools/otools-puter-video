@@ -131,16 +131,34 @@ fn respond_err(message: impl Into<String>) -> Value {
 }
 
 /// 与可执行文件目录无关：用 PATH + 常见 Homebrew 安装点找 ffmpeg（和 gif 一致）。
+///
+/// 关键坑：GUI 应用（从 Finder 启动的 OTools.app）**不会**继承 shell 的 login
+/// profile，所以 `/opt/homebrew/bin` 大概率不在 `PATH` 上——用户在终端里 `which
+/// ffmpeg` 能找到，本进程（Rust dylib 跑在宿主进程里）`which` 却找不到，于是「装了
+/// 还是不行」。所以除了 PATH 兜底，还要把 Homebrew 的标准安装点、opt 软链、`brew
+/// --prefix` 的返回都试一遍（Apple Silicon / Intel 两套都覆盖）。
 fn detect_ffmpeg() -> Option<PathBuf> {
-    let candidates = [
-        "/opt/homebrew/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/usr/bin/ffmpeg",
+    let mut candidates: Vec<PathBuf> = vec![
+        PathBuf::from("/opt/homebrew/bin/ffmpeg"),
+        PathBuf::from("/usr/local/bin/ffmpeg"),
+        PathBuf::from("/usr/bin/ffmpeg"),
+        // Homebrew 的 opt 软链（brew 装完会指到 Cellar 里的当前版本）。
+        PathBuf::from("/opt/homebrew/opt/ffmpeg/bin/ffmpeg"),
+        PathBuf::from("/usr/local/opt/ffmpeg/bin/ffmpeg"),
     ];
-    for candidate in candidates {
-        let path = PathBuf::from(candidate);
-        if path.is_file() {
-            return Some(path);
+    // `brew --prefix ffmpeg` 给出真实安装根（覆盖任何自定义 prefix）。
+    if let Ok(out) = Command::new("brew").args(["--prefix", "ffmpeg"]).output() {
+        if out.status.success() {
+            let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !root.is_empty() {
+                let p = PathBuf::from(&root).join("bin/ffmpeg");
+                candidates.push(p);
+            }
+        }
+    }
+    for candidate in &candidates {
+        if candidate.is_file() {
+            return Some(candidate.clone());
         }
     }
     // PATH 兜底（跨平台；目前只跑 macOS，但留着无害）。
@@ -150,6 +168,40 @@ fn detect_ffmpeg() -> Option<PathBuf> {
             let text = String::from_utf8_lossy(&output.stdout);
             if let Some(line) = text.lines().map(str::trim).find(|l| !l.is_empty()) {
                 return Some(PathBuf::from(line));
+            }
+        }
+    }
+    None
+}
+
+fn command_exists(binary: &str) -> bool {
+    let finder = if cfg!(target_os = "windows") { "where" } else { "which" };
+    Command::new(finder)
+        .arg(binary)
+        .output()
+        .map(|out| out.status.success() && !String::from_utf8_lossy(&out.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// 找 brew 二进制：GUI 应用（Finder 启动的 OTools.app）不继承 shell 的 PATH，
+/// 所以 `/opt/homebrew/bin/brew` 多半不在 PATH 上。直接探测常见安装点，再 PATH 兜底。
+fn brew_binary() -> Option<PathBuf> {
+    for candidate in [
+        PathBuf::from("/opt/homebrew/bin/brew"),
+        PathBuf::from("/usr/local/bin/brew"),
+    ] {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    if command_exists("brew") {
+        // PATH 兜底：用 which 拿到的第一个路径。
+        if let Ok(out) = Command::new(if cfg!(target_os = "windows") { "where" } else { "which" }).arg("brew").output() {
+            if out.status.success() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                if let Some(line) = text.lines().map(str::trim).find(|l| !l.is_empty()) {
+                    return Some(PathBuf::from(line));
+                }
             }
         }
     }
@@ -187,6 +239,36 @@ fn ffmpeg_probe() -> Value {
     }
 }
 
+/// 一键安装 ffmpeg（当前只 macOS + brew）。给导出界面里的“安装”按钮用。
+/// 安装可能耗时较久，但宿主把 invoke 投到 blocking 线程，不会卡 UI。
+fn install_ffmpeg(request: InstallFfmpegRequest) -> Result<Value, String> {
+    if !cfg!(target_os = "macos") {
+        return Err("自动安装 ffmpeg 目前只在 macOS 提供（h264_videotoolbox 是 Apple 独占）。".to_string());
+    }
+    let brew = brew_binary().ok_or_else(|| {
+        "未找到 Homebrew（brew）。请先安装 Homebrew，再 brew install ffmpeg；或手动安装含 h264_videotoolbox 的 ffmpeg。".to_string()
+    })?;
+    let package_manager = request
+        .package_manager
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("brew");
+    if package_manager != "brew" {
+        return Err(format!("不支持的包管理器：{package_manager}"));
+    }
+    let output = Command::new(&brew)
+        .args(["install", "ffmpeg"])
+        .output()
+        .map_err(|error| format!("启动 brew 失败: {error}"))?;
+    Ok(json!({
+        "success": output.status.success(),
+        "command": stringify(&brew, &["install".to_string(), "ffmpeg".to_string()]),
+        "stdout": String::from_utf8_lossy(&output.stdout).trim(),
+        "stderr": String::from_utf8_lossy(&output.stderr).trim(),
+    }))
+}
+
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct EncodeH264Request {
@@ -196,6 +278,12 @@ struct EncodeH264Request {
     height: i32,
     bitrate: i64,
     output_path: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct InstallFfmpegRequest {
+    package_manager: Option<String>,
 }
 
 fn stringify(program: &std::path::Path, args: &[String]) -> String {
@@ -281,6 +369,13 @@ fn encode_h264(request: EncodeH264Request) -> Result<Value, String> {
 fn dispatch(method: &str, payload: Value) -> Value {
     match method {
         "ffmpeg_probe" => ffmpeg_probe(),
+        "install_ffmpeg" => match serde_json::from_value::<InstallFfmpegRequest>(payload) {
+            Ok(request) => match install_ffmpeg(request) {
+                Ok(data) => respond_ok(data),
+                Err(error) => respond_err(error),
+            },
+            Err(error) => respond_err(format!("install_ffmpeg 参数错误: {error}")),
+        },
         "encode_h264" => match serde_json::from_value::<EncodeH264Request>(payload) {
             Ok(request) => match encode_h264(request) {
                 Ok(data) => respond_ok(data),
@@ -346,5 +441,13 @@ mod tests {
         // 本 crate 的入口有护栏（不崩即过）。
         let v = invoke_json("encode_h264", json!({ "framesDir": "" }));
         assert_eq!(v["ok"], json!(false));
+    }
+
+    #[test]
+    fn install_ffmpeg_dispatch_is_wired_and_safe() {
+        // 用不支持的包管理器，验证 dispatch 接线 + 参数解析，且不会真的跑 brew install。
+        let v = invoke_json("install_ffmpeg", json!({ "packageManager": "nonsense" }));
+        assert_eq!(v["ok"], json!(false));
+        assert!(v["error"].as_str().unwrap().contains("包管理器"));
     }
 }

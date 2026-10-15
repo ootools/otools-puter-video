@@ -431,9 +431,112 @@ const canSaveLocally = () => hostReady();`,
   {
     file: 'src/ui/export-dialog.js',
     find: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos } from '../otools/ui.js';",
-    replace: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos } from '../otools/ui.js';\nimport { probeCodecs, summarizeProbes } from '../otools/codec-probe.js';\nimport { nativeH264Reason } from '../otools/native-encoder.js';",
+    replace: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos } from '../otools/ui.js';\nimport { probeCodecs, summarizeProbes } from '../otools/codec-probe.js';\nimport { nativeH264Reason, nativeH264Available, installFfmpeg, reprobeNativeH264 } from '../otools/native-encoder.js';",
     expect: 1,
     why: '诊断：导入裸 WebCodecs 探测 + 原生 H.264 状态，卡住时告诉用户到底哪个编码真出不了帧、原生为什么没走',
+  },
+
+  /* ===================== 原生 H.264 提示 + 一键安装 ffmpeg ===================== */
+  // 用户实机踩到：H.264 在 WKWebView 静默挂死，装了 ffmpeg 仍不顶用（多半是旧 .oplg
+  // 的 .dylib 被宿主缓存、或 ffmpeg 不在被探测的 PATH 上）。与其出了错再说「去装
+  // ffmpeg」，不如在**导出设置界面**就主动探测：选了 H.264/MP4 却本机没装 ffmpeg
+  // （或 ffmpeg 不带 h264_videotoolbox）时，直接给个常驻提示 +「一键安装」按钮。
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "  const codecNote = h('p.export-hint.export-codec-note', { role: 'status' });",
+    replace: "  const codecNote = h('p.export-hint.export-codec-note', { role: 'status' });\n  // 原生 H.264 提示框：H.264/MP4 且本机没装 ffmpeg（或 ffmpeg 不带 h264_videotoolbox）时，\n  // 提示可一键安装，装完即走 Apple 硬件编码（见 refreshNativeHint）。默认隐藏。\n  const nativeH264Hint = h('div.export-native-hint', { role: 'status' });\n  nativeH264Hint.hidden = true;",
+    expect: 1,
+    why: '导出设置里放一个原生 H.264 提示框（装 ffmpeg 的入口）',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "}, [format.row, codec.row, res.row, fps.row, bitrate.row, customRow, audioRow, codecNote]);",
+    replace: "}, [format.row, codec.row, res.row, fps.row, bitrate.row, customRow, audioRow, codecNote, nativeH264Hint]);",
+    expect: 1,
+    why: '把原生 H.264 提示框放进视频区',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "  /* Live state ---------------------------------------------------------------- */\n  function update() {",
+    replace: `  /* 原生 H.264 提示：H.264/MP4 + 本机没装 ffmpeg 时，提示一键安装并装完重探。 */
+  let nativeHintReq = 0;
+  let nativeHintBusy = false;
+  async function refreshNativeHint() {
+    const my = ++nativeHintReq;
+    if (s.codec !== 'avc' || s.format !== 'mp4' || !s.video) {
+      nativeH264Hint.hidden = true;
+      nativeH264Hint.replaceChildren();
+      return;
+    }
+    nativeH264Hint.hidden = false;
+    if (!hostReady()) {
+      nativeH264Hint.replaceChildren(h('p', '本机没有可用的硬件 H.264 编码（需要 OTools 宿主 + ffmpeg）。改用 VP9 / WebM 也能导出。'));
+      return;
+    }
+    const ok = await nativeH264Available();
+    if (my !== nativeHintReq) return; // 已被更新的刷新取代，丢弃本次结果
+    const reason = nativeH264Reason();
+    if (ok) {
+      nativeH264Hint.replaceChildren(h('p.export-native-ok', icon('check', 14), '已启用 Apple 硬件 H.264 编码：稳定、不卡 0%。'));
+      return;
+    }
+    if (reason === 'ffmpeg-missing-or-no-videotoolbox') {
+      const install = h('button.btn.small.primary', { type: 'button' }, '一键安装 ffmpeg');
+      install.addEventListener('click', async () => {
+        nativeHintBusy = true;
+        install.disabled = true;
+        nativeH264Hint.replaceChildren(h('p', '正在安装 ffmpeg（brew install ffmpeg），可能需要一两分钟，期间不会卡住界面…'));
+        try {
+          const r = await installFfmpeg();
+          if (r && r.success) {
+            const nowOk = await reprobeNativeH264();
+            nativeHintBusy = false;
+            if (nowOk) refreshNativeHint();
+            else nativeH264Hint.replaceChildren(h('p', 'ffmpeg 已装好，但本机 ffmpeg 仍不带 h264_videotoolbox 编码器。请装 Homebrew 官方 ffmpeg（brew install ffmpeg），或改用 VP9 / WebM。'));
+          } else {
+            nativeHintBusy = false;
+            const detail = (r && (r.stderr || r.stdout)) ? String(r.stderr || r.stdout).trim().slice(0, 240) : '';
+            nativeH264Hint.replaceChildren(h('p', \`安装失败，请手动在终端运行：brew install ffmpeg\${detail ? \`（\${detail}）\` : ''}。\`));
+          }
+        } catch (err) {
+          nativeHintBusy = false;
+          nativeH264Hint.replaceChildren(h('p', \`安装失败：\${String(err?.message || err)}。请手动在终端运行 brew install ffmpeg。\`));
+        }
+      });
+      nativeH264Hint.replaceChildren(h('p', '原生 H.264 还没启用：本机未装 ffmpeg 或 ffmpeg 不含 h264_videotoolbox。装好后即用 Apple 硬件 H.264 稳定导出，不再卡 0%。'), install);
+      return;
+    }
+    if (nativeHintBusy) return; // 安装进行中由安装回调接管，不覆盖
+    const text = reason === 'not-mac'
+      ? '当前系统不是 macOS，原生 H.264 硬件编码不可用（h264_videotoolbox 是 Apple 独占）。改用 VP9 / WebM 也能导出。'
+      : reason === 'host-unavailable'
+        ? '当前不在 OTools 宿主里，原生 H.264 编码不可用。改用 VP9 / WebM 也能导出。'
+        : reason === 'invoke-failed'
+          ? '宿主原生编码调用失败，原生 H.264 暂时不可用。请确认用的是最新版插件，或改用 VP9 / WebM。'
+          : reason === 'not-probed'
+            ? '正在检测原生 H.264 编码…'
+            : \`原生 H.264 不可用（\${reason}）。改用 VP9 / WebM 也能导出。\`;
+    nativeH264Hint.replaceChildren(h('p', text));
+  }
+
+  /* Live state ---------------------------------------------------------------- */
+  function update() {`,
+    expect: 1,
+    why: '导出设置里主动探测原生 H.264：缺 ffmpeg 给常驻提示 + 一键安装，装完重探',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "    stillMeta.textContent = `${size.width} x ${size.height}  ${s.fps} fps`;\n  }",
+    replace: "    stillMeta.textContent = `${size.width} x ${size.height}  ${s.fps} fps`;\n    // 原生 H.264 提示：H.264/MP4 且本机没装 ffmpeg 时提示一键安装；结论异步刷新。\n    refreshNativeHint();\n  }",
+    expect: 1,
+    why: '每次刷新设置都重算原生 H.264 提示（结论异步回填，不阻塞 UI）',
+  },
+  {
+    file: 'src/styles/export.css',
+    find: ".export-codec-note {\n  padding-left: 128px;\n  margin: 2px 0 4px;\n  font-variant-numeric: tabular-nums;\n}",
+    replace: ".export-codec-note {\n  padding-left: 128px;\n  margin: 2px 0 4px;\n  font-variant-numeric: tabular-nums;\n}\n\n/* 原生 H.264 提示框（装 ffmpeg 的入口） */\n.export-native-hint {\n  padding-left: 128px;\n  margin: 4px 0 2px;\n  font-size: 12px;\n  color: var(--text-2);\n}\n\n.export-native-hint[hidden] {\n  display: none;\n}\n\n.export-native-hint p {\n  margin: 0 0 6px;\n}\n\n.export-native-hint .btn {\n  margin-top: 2px;\n}\n\n.export-native-ok {\n  color: var(--success);\n  display: inline-flex;\n  align-items: center;\n  gap: 4px;\n}",
+    expect: 1,
+    why: '原生 H.264 提示框的样式',
   },
 
   /* ============================ 导出卡住时说清「停在哪一步」 ============================ */

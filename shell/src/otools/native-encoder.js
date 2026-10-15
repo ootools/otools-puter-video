@@ -29,6 +29,26 @@ export function _resetNativeH264Availability() {
   lastReason = 'not-probed';
 }
 
+/**
+ * 一键安装 ffmpeg（宿主原生方法，brew 安装）。给导出界面里的「安装 ffmpeg」按钮用。
+ * 安装可能耗时较久，但宿主把 invoke 投到 blocking 线程，不会卡 UI。
+ * 返回结构化结果 `{ success, command, stdout, stderr }`，失败抛错（走回落逻辑）。
+ * 宿主不在 / 非 mac / 包装没接 invokeNative —— 直接抛错，让 UI 提示手动安装。
+ */
+export async function installFfmpeg() {
+  return invokeNative('install_ffmpeg', {});
+}
+
+/**
+ * 装完 ffmpeg 后强制重新探测一次原生 H.264 是否可用（清掉缓存再探）。
+ * 返回最新的 `nativeH264Available()`；UI 装完按钮后据此刷新提示与推选状态。
+ */
+export async function reprobeNativeH264() {
+  availableCache = null;
+  lastReason = 'not-probed';
+  return nativeH264Available();
+}
+
 /** 最近一次 nativeH264Available() 为什么可用/不可用（同步读取；没探过返回 'not-probed'）。 */
 export function nativeH264Reason() {
   return lastReason;

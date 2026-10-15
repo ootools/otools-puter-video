@@ -17,6 +17,8 @@ vi.mock('../src/otools/host.js', () => {
     removed: [],
     encodes: [],
     removedOK: true,
+    installResult: { success: true, command: 'brew install ffmpeg', stdout: 'ok', stderr: '' },
+    installThrows: false,
   };
   return {
     __mock: mock,
@@ -35,13 +37,17 @@ vi.mock('../src/otools/host.js', () => {
       if (mock.invokeThrows) throw new Error('native 调用失败');
       if (method === 'ffmpeg_probe') return mock.probe;
       if (method === 'encode_h264') { mock.encodes.push(payload); return { outputPath: payload.outputPath, bytes: 4 }; }
+      if (method === 'install_ffmpeg') {
+        if (mock.installThrows) throw new Error('native 调用失败');
+        return mock.installResult;
+      }
       throw new Error(`unknown method ${method}`);
     },
   };
 });
 
 const host = await import('../src/otools/host.js');
-const { nativeH264Available, exportVideoNativeH264, nativeH264Reason, _resetNativeH264Availability } = await import('../src/otools/native-encoder.js');
+const { nativeH264Available, exportVideoNativeH264, nativeH264Reason, installFfmpeg, reprobeNativeH264, _resetNativeH264Availability } = await import('../src/otools/native-encoder.js');
 const mock = host.__mock;
 
 const fakeCanvas = () => ({ toDataURL: () => 'data:image/jpeg;base64,QUFBQg==' });
@@ -54,6 +60,8 @@ beforeEach(() => {
   mock.writes = [];
   mock.removed = [];
   mock.encodes = [];
+  mock.installResult = { success: true, command: 'brew install ffmpeg', stdout: 'ok', stderr: '' };
+  mock.installThrows = false;
 });
 
 describe('nativeH264Available', () => {
@@ -130,5 +138,34 @@ describe('exportVideoNativeH264', () => {
       renderFrame: async () => fakeCanvas(),
     })).rejects.toMatchObject({ name: 'AbortError' });
     expect(mock.encodes).toHaveLength(0);
+  });
+});
+
+describe('installFfmpeg / reprobeNativeH264', () => {
+  it('installFfmpeg 返回结构化安装结果', async () => {
+    const r = await installFfmpeg();
+    expect(r).toMatchObject({ success: true, command: 'brew install ffmpeg' });
+  });
+
+  it('原生调用失败 → installFfmpeg 抛错（交 UI 提示手动安装）', async () => {
+    mock.installThrows = true;
+    await expect(installFfmpeg()).rejects.toThrow();
+  });
+
+  it('安装失败（success:false）→ installFfmpeg 仍返回结果，UI 读 success 判断', async () => {
+    mock.installResult = { success: false, command: 'brew install ffmpeg', stdout: '', stderr: 'already installed' };
+    const r = await installFfmpeg();
+    expect(r.success).toBe(false);
+    expect(String(r.stderr)).toContain('already installed');
+  });
+
+  it('reprobeNativeH264 清掉缓存并重探：装好后从 false 变 true', async () => {
+    mock.probe = { installed: false, videoToolbox: false };
+    expect(await nativeH264Available()).toBe(false);
+    // 模拟「装好了 ffmpeg」：改探测结果，再强制重探。
+    mock.probe = { installed: true, videoToolbox: true };
+    const ok = await reprobeNativeH264();
+    expect(ok).toBe(true);
+    expect(nativeH264Reason()).toBe('ok');
   });
 });
