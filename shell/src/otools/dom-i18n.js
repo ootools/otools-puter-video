@@ -192,12 +192,30 @@ function translateAttributes(el) {
   }
 }
 
+/**
+ * INPUT / TEXTAREA 这类「叶子级跳过元素」：它们的**值/内容**是用户数据
+ * （项目名、字幕正文…）不能翻，但它们的**展示属性**（placeholder / title /
+ * aria-label …）属于界面文案，仍需翻译。用这个函数把两种情况分开。
+ */
+function isFormControl(el) {
+  if (!el || el.nodeType !== 1) return false;
+  const tag = el.tagName ? el.tagName.toUpperCase() : '';
+  return tag === 'INPUT' || tag === 'TEXTAREA';
+}
+
 /** 遍历一棵已经在非跳过区里的子树（跳过区在子节点处剪枝）。 */
 function translateSubtree(el) {
   translateAttributes(el);
   for (const child of el.childNodes) {
     if (child.nodeType === 3) translateTextNode(child);
-    else if (child.nodeType === 1 && !skippedElement(child)) translateSubtree(child);
+    else if (child.nodeType === 1) {
+      if (skippedElement(child)) {
+        // 跳过元素的内容（用户数据）不翻；但表单控件的展示属性仍要翻。
+        if (isFormControl(child)) translateAttributes(child);
+      } else {
+        translateSubtree(child);
+      }
+    }
   }
 }
 
@@ -209,7 +227,11 @@ function translateNode(node) {
     return;
   }
   if (node.nodeType !== 1) return;
-  if (insideSkipped(node)) return;
+  if (insideSkipped(node)) {
+    // INPUT / TEXTAREA 落在跳过区：内容（用户数据）不翻，但展示属性仍要翻。
+    if (isFormControl(node)) translateAttributes(node);
+    return;
+  }
   translateSubtree(node);
 }
 
@@ -257,17 +279,45 @@ function schedule(node) {
   else setTimeout(flush, 16);
 }
 
+/**
+ * 判断这次 `characterData` 改动是不是翻译层自己刚写进去的。
+ *
+ * 翻译层写到文本节点的目标值永远是 `t(原文)`。如果节点当前值正好等于
+ * 「按已记录的原文算出来的译文」，说明这是我们的写入、不是上游重渲染——
+ * 千万别把原文删掉，否则下次切语言时查不到英文原文，译文就回不去（表现为
+ * 「语言切换无效」）。只有当前值 ≠ `t(原文)` 时，才认定上游真改了文案。
+ */
+function isOurTextWrite(node) {
+  const original = textOriginals.get(node);
+  if (original === undefined) return false;
+  const now = node.nodeValue || '';
+  return now.trim() === t(original);
+}
+
+/** 同 {@link isOurTextWrite}，针对某个展示属性。 */
+function isOurAttrWrite(el, attr) {
+  const map = attrOriginals.get(el);
+  const original = map?.get(attr);
+  if (original === undefined) return false;
+  const now = el.getAttribute(attr) || '';
+  return now === t(original);
+}
+
 function onMutations(records) {
   if (!enabled) return;
   for (const record of records) {
     if (record.type === 'childList') {
       for (const node of record.addedNodes) schedule(node);
     } else if (record.type === 'characterData') {
-      // 上游重新渲染了这段文本：忘掉旧原文，按新的重新来
-      textOriginals.delete(record.target);
+      if (!isOurTextWrite(record.target)) {
+        // 上游真的改了文案：忘掉旧原文，按新内容重新翻译
+        textOriginals.delete(record.target);
+      }
       schedule(record.target);
     } else if (record.type === 'attributes') {
-      attrOriginals.get(record.target)?.delete(record.attributeName);
+      if (!isOurAttrWrite(record.target, record.attributeName)) {
+        attrOriginals.get(record.target)?.delete(record.attributeName);
+      }
       schedule(record.target);
     }
   }
