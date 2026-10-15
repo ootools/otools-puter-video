@@ -14,6 +14,7 @@ vi.mock('../src/otools/host.js', () => {
     probe: { installed: true, videoToolbox: true },
     invokeThrows: false,
     writes: [],
+    blobs: [],
     removed: [],
     encodes: [],
     removedOK: true,
@@ -30,6 +31,7 @@ vi.mock('../src/otools/host.js', () => {
     createDir: async () => {},
     removeEntry: async (p) => { mock.removed.push(p); },
     writeFile: async (path) => { mock.writes.push(path); },
+    writeBlob: async (path) => { mock.blobs.push(path); },
     readFile: async (path) => ({ path, dataBase64: 'QUFB' }),
     base64ToBlob: (b64, mime) => ({ __blob: true, mime, b64 }),
     bytesToBase64: (bytes) => 'QUJD',
@@ -47,9 +49,35 @@ vi.mock('../src/otools/host.js', () => {
   };
 });
 
+// 上游的离线混音很重（mediabunny + worklet）；这里只验证「有音轨时把 WAV 交给 ffmpeg」，
+// 所以把混音和可听片段判定都 mock 掉。
+vi.mock('../src/engine/audio-mix.js', () => {
+  const mock = {
+    channels: [new Float32Array(4), new Float32Array(4)],
+    throws: false,
+    calls: [],
+  };
+  return {
+    __audioMock: mock,
+    renderAudio: async (_project, _library, opts) => {
+      if (mock.throws) throw new Error('混音失败');
+      mock.calls.push(opts);
+      return { sampleRate: (opts && opts.sampleRate) || 48000, channels: mock.channels };
+    },
+    encodeWav: (planar, sampleRate) => ({ __wav: true, planar, sampleRate }),
+  };
+});
+
+vi.mock('../src/engine/scene.js', () => {
+  const mock = { audible: [{ id: 'clip1' }] };
+  return { __sceneMock: mock, audibleClips: () => mock.audible };
+});
+
 const host = await import('../src/otools/host.js');
 const { nativeH264Available, exportVideoNativeH264, nativeH264Reason, installFfmpeg, reprobeNativeH264, _resetNativeH264Availability } = await import('../src/otools/native-encoder.js');
 const mock = host.__mock;
+const audioMock = (await import('../src/engine/audio-mix.js')).__audioMock;
+const sceneMock = (await import('../src/engine/scene.js')).__sceneMock;
 
 const fakeCanvas = () => ({ toDataURL: () => 'data:image/jpeg;base64,QUFBQg==' });
 
@@ -66,10 +94,14 @@ beforeEach(() => {
   mock.probe = { installed: true, videoToolbox: true };
   mock.invokeThrows = false;
   mock.writes = [];
+  mock.blobs = [];
   mock.removed = [];
   mock.encodes = [];
   mock.installResult = { success: true, command: 'brew install ffmpeg', stdout: 'ok', stderr: '' };
   mock.installThrows = false;
+  audioMock.throws = false;
+  audioMock.calls = [];
+  sceneMock.audible = [{ id: 'clip1' }];
 });
 
 describe('nativeH264Available', () => {
@@ -161,6 +193,65 @@ describe('exportVideoNativeH264', () => {
       renderFrame: async () => fakeCanvas(),
     })).rejects.toMatchObject({ name: 'AbortError' });
     expect(mock.encodes).toHaveLength(0);
+  });
+});
+
+describe('exportVideoNativeH264 · 音轨', () => {
+  it('有可听片段时：混音成 WAV 落盘，并把 audioPath 交给 ffmpeg', async () => {
+    const result = await exportVideoNativeH264({
+      width: 640, height: 360, fps: 30, bitrate: 4_000_000,
+      total: 3, duration: 3_000_000, name: 'with-audio',
+      renderFrame: async () => fakeCanvas(),
+      audio: { project: {}, library: {} },
+    });
+    // 混音跑了一次，输出 WAV 写到 audio.wav。
+    expect(audioMock.calls).toHaveLength(1);
+    expect(mock.blobs).toHaveLength(1);
+    expect(mock.blobs[0]).toMatch(/\/audio\.wav$/);
+    // 编码调用带上了音轨路径，且读回结果标注了 aac 音轨。
+    expect(mock.encodes).toHaveLength(1);
+    expect(mock.encodes[0].audioPath).toMatch(/\/audio\.wav$/);
+    expect(result.audioCodec).toBe('aac');
+  });
+
+  it('工程无音轨（audibleClips 为空）→ 不加音轨，导出无声视频', async () => {
+    sceneMock.audible = [];
+    const result = await exportVideoNativeH264({
+      width: 640, height: 360, fps: 30, bitrate: 4_000_000,
+      total: 3, duration: 3_000_000, name: 'silent',
+      renderFrame: async () => fakeCanvas(),
+      audio: { project: {}, library: {} },
+    });
+    expect(audioMock.calls).toHaveLength(0);
+    expect(mock.blobs).toHaveLength(0);
+    expect(mock.encodes[0].audioPath).toBeUndefined();
+    expect(result.audioCodec).toBeNull();
+  });
+
+  it('混音失败不毁整次导出：降级为无声视频', async () => {
+    audioMock.throws = true;
+    const result = await exportVideoNativeH264({
+      width: 640, height: 360, fps: 30, bitrate: 4_000_000,
+      total: 3, duration: 3_000_000, name: 'mix-fail',
+      renderFrame: async () => fakeCanvas(),
+      audio: { project: {}, library: {} },
+    });
+    expect(mock.blobs).toHaveLength(0);
+    expect(mock.encodes).toHaveLength(1);
+    expect(mock.encodes[0].audioPath).toBeUndefined();
+    expect(result.mimeType).toBe('video/mp4');
+    expect(result.audioCodec).toBeNull();
+  });
+
+  it('没传 audio（未勾选音频）→ 不混音、不加音轨', async () => {
+    const result = await exportVideoNativeH264({
+      width: 640, height: 360, fps: 30, bitrate: 4_000_000,
+      total: 3, duration: 3_000_000, name: 'no-audio-opt',
+      renderFrame: async () => fakeCanvas(),
+    });
+    expect(audioMock.calls).toHaveLength(0);
+    expect(mock.encodes[0].audioPath).toBeUndefined();
+    expect(result.audioCodec).toBeNull();
   });
 });
 

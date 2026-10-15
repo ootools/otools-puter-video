@@ -662,8 +662,9 @@ export function currentExportParams() {
   exportStage = '';
   // 【原生 H.264 快路径】H.264/MP4 且宿主可用（macOS + ffmpeg 带 h264_videotoolbox）时，
   // 不走浏览器 WebCodecs——它在部分 WKWebView（实测 1080p）把 H.264 编到一半静默挂死。
-  // 改走宿主硬件编码：逐帧渲染成 JPEG 落盘，交 ffmpeg 编 H.264/MP4（video-only MVP）。
-  // 任一条件不满足就继续走下面的 WebCodecs 管线（VP9/WebM 在浏览器里可靠）。
+  // 改走宿主硬件编码：逐帧渲染成 JPEG 落盘，交 ffmpeg 编 H.264/MP4；音轨在 native-encoder
+  // 里用工程混音成 WAV，一并交给 ffmpeg 封进 MP4（AAC）。任一条件不满足就继续走下面的
+  // WebCodecs 管线（VP9/WebM 在浏览器里可靠）。
   if (s.video && !s.gif && s.codec === 'avc' && s.format === 'mp4' && (await nativeH264Available())) {
     exportStage = '原生编码（ffmpeg）';
     const nativeRenderer = new FrameRenderer(project, library, width, height);
@@ -671,6 +672,8 @@ export function currentExportParams() {
       return await exportVideoNativeH264({
         width, height, fps, bitrate, total, duration, name: base,
         signal, onProgress,
+        // 音轨：和上游一致，只在勾选音频时才混；具体有无可听片段由 native-encoder 判定。
+        audio: s.includeAudio ? { project, library } : null,
         renderFrame: async (i) => { await nativeRenderer.render(frameTime(i, fps)); return nativeRenderer.canvas; },
       });
     } finally {

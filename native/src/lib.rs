@@ -278,6 +278,9 @@ struct EncodeH264Request {
     height: i32,
     bitrate: i64,
     output_path: String,
+    /// 可选音轨：调用方已把工程混音成 16-bit PCM WAV 落在磁盘上，这里让 ffmpeg 读它
+    /// 并按 AAC 编进 MP4。缺省（null / 空）→ 无声视频（`-an`）。
+    audio_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -311,8 +314,13 @@ fn encode_h264(request: EncodeH264Request) -> Result<Value, String> {
     let bitrate = request.bitrate.max(1);
     let gop = ((fps * 2.0).round() as i64).max(1);
     let input = format!("{}/%06d.jpg", frames_dir.trim_end_matches('/'));
+    let audio_path = request
+        .audio_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
 
-    let args = vec![
+    let mut args: Vec<String> = vec![
         "-hide_banner".to_string(),
         "-loglevel".to_string(),
         "error".to_string(),
@@ -323,7 +331,15 @@ fn encode_h264(request: EncodeH264Request) -> Result<Value, String> {
         format!("{fps}"),
         "-i".to_string(),
         input,
-        "-an".to_string(),
+    ];
+    // 音轨：调用方已把工程混音成 WAV 落在磁盘上，这里让 ffmpeg 直接读它并按 AAC 封装
+    // 进 MP4（`-shortest` 保证音视频等长）。没有音轨时才 `-an`——与上游「无声工程不带
+    // 音轨」的行为一致。
+    if let Some(audio) = audio_path {
+        args.push("-i".to_string());
+        args.push(audio.to_string());
+    }
+    args.extend([
         "-c:v".to_string(),
         "h264_videotoolbox".to_string(),
         "-b:v".to_string(),
@@ -337,8 +353,19 @@ fn encode_h264(request: EncodeH264Request) -> Result<Value, String> {
         // 保险：强制偶数尺寸（H.264 level 要求），除非本来就这样否则不动尺寸。
         "-vf".to_string(),
         "scale=trunc(iw/2)*2:trunc(ih/2)*2".to_string(),
-        output_path.to_string(),
-    ];
+    ]);
+    if audio_path.is_some() {
+        args.extend([
+            "-c:a".to_string(),
+            "aac".to_string(),
+            "-b:a".to_string(),
+            "192k".to_string(),
+            "-shortest".to_string(),
+        ]);
+    } else {
+        args.push("-an".to_string());
+    }
+    args.push(output_path.to_string());
 
     let output = Command::new(&ffmpeg)
         .args(&args)
@@ -441,6 +468,23 @@ mod tests {
         // 本 crate 的入口有护栏（不崩即过）。
         let v = invoke_json("encode_h264", json!({ "framesDir": "" }));
         assert_eq!(v["ok"], json!(false));
+    }
+
+    #[test]
+    fn encode_accepts_audio_path_without_param_error() {
+        // 传了 audioPath 也不该被当成参数错误——要么成功，要么因为没装 ffmpeg 失败，
+        // 绝不能是「encode_h264 参数错误」。
+        let v = invoke_json(
+            "encode_h264",
+            json!({
+                "framesDir": "/no/such",
+                "outputPath": "/tmp/x.mp4",
+                "audioPath": "/tmp/a.wav",
+            }),
+        );
+        assert_eq!(v["ok"], json!(false));
+        let error = v["error"].as_str().unwrap();
+        assert!(!error.contains("参数错误"), "audioPath 不应导致参数错误: {error}");
     }
 
     #[test]

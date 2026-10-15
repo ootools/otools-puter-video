@@ -1,5 +1,5 @@
 /**
- * 宿主原生 H.264/MP4 导出（video-only MVP）。
+ * 宿主原生 H.264/MP4 导出（含音轨）。
  * ------------------------------------------------------------------
  * 为什么存在：浏览器 WebCodecs 的 H.264 在部分 webview（用户实测 macOS WKWebView
  * 1080p）编码到中途会静默挂死——`isConfigSupported()` 还说支持。VP9（软件 libvpx）
@@ -8,15 +8,19 @@
  *
  * 数据流：调用方逐帧渲染成 canvas → 这里编成 JPEG(base64) → host.writeFile 落到临时
  * 目录的 `%06d.jpg` → 调原生 `encode_h264` 让 ffmpeg 一次性编成 H.264/MP4 → readFile
- * 读回成 blob（交给既有保存流程）。临时目录用完即删。
+ * 读回成 blob（交给既有保存流程）。音轨：调用方把工程交给这里，用上游的离线混音
+ * (`renderAudio`) 生成 16-bit PCM WAV 落盘，再让 ffmpeg 一起封进 MP4（AAC）——这样
+ * 声音走的是和 WebCodecs 管线完全相同的混音，只是封装交给 ffmpeg。临时目录用完即删。
  *
  * 这是移植层自己的模块，宿主不在 / 非 mac / 没装 ffmpeg 时 `nativeH264Available()`
  * 返回 false，上游导出管线**原样回落**到 WebCodecs（VP9/WebM），行为与从前一致。
  */
 import {
   available, channel, env, knownPath, joinPath, createDir, removeEntry,
-  writeFile, readFile, base64ToBlob, bytesToBase64, invokeNative, diag,
+  writeFile, writeBlob, readFile, base64ToBlob, bytesToBase64, invokeNative, diag,
 } from './host.js';
+import { renderAudio, encodeWav } from '../engine/audio-mix.js';
+import { audibleClips } from '../engine/scene.js';
 
 /** 进程内缓存探测结果（null=还没探）。H.264 导入只会稳定地「可用/不可用」。 */
 let availableCache = null;
@@ -148,7 +152,7 @@ const pad = (n, w) => String(n).padStart(w, '0');
 const yieldToEventLoop = () => new Promise((r) => setTimeout(r, 0));
 
 /**
- * 逐帧渲染 → JPEG 落盘 → ffmpeg(H.264) → MP4 blob。
+ * 逐帧渲染 → JPEG 落盘 → ffmpeg(H.264) → MP4 blob（音轨可选）。
  *
  * @param {object}   o
  * @param {number}   o.width
@@ -156,15 +160,17 @@ const yieldToEventLoop = () => new Promise((r) => setTimeout(r, 0));
  * @param {number}   o.fps
  * @param {number}   o.bitrate     目标码率（bit/s）
  * @param {number}   o.total       总帧数
- * @param {number}   o.duration    时长（秒）
+ * @param {number}   o.duration    时长（微秒，与上游 US 单位一致）
  * @param {string}   o.name        输出文件名（不含扩展名）
  * @param {AbortSignal} [o.signal]
  * @param {Function} [o.onProgress] 与 upstream 管线同形：{ phase, done, total, fraction, elapsed, remaining, preview? }
  * @param {(i:number)=>Promise<HTMLCanvasElement>} o.renderFrame 渲染第 i 帧并返回画布
+ * @param {{project:object,library:object,sampleRate?:number,channels?:number}} [o.audio]
+ *        给了就混音成 WAV 并封进 MP4；无工程/无音轨/混音失败 → 导出无声视频（不致命）。
  */
 export async function exportVideoNativeH264({
   width, height, fps, bitrate, total, duration, name,
-  signal, onProgress, renderFrame,
+  signal, onProgress, renderFrame, audio,
 }) {
   const root = await makeScratchDir('native-h264');
   const framesDir = await joinPath(root, 'frames');
@@ -172,6 +178,7 @@ export async function exportVideoNativeH264({
   const outputName = `${name || 'export'}.mp4`;
   const outputPath = await joinPath(root, outputName);
   const started = performance.now();
+  let audioPath = null;
   try {
     let lastPreview = 0;
     let lastReport = 0;
@@ -204,8 +211,33 @@ export async function exportVideoNativeH264({
         lastYield = performance.now();
       }
     }
+
+    // 音轨：用上游同一套离线混音（renderAudio）把工程声音渲成 WAV 落盘，交给 ffmpeg 封装。
+    // 混音失败不毁整次导出——降级为无声视频（与「无声工程不带音轨」一致），只告警。
+    if (audio && audio.project) {
+      try {
+        if (audibleClips(audio.project).length) {
+          onProgress?.({ phase: 'audio', done: 0, total: 1, fraction: 0.99, elapsed: (performance.now() - started) / 1000, remaining: 0 });
+          const sampleRate = audio.sampleRate || 48000;
+          const channels = audio.channels || 2;
+          const mixed = await renderAudio(audio.project, audio.library, {
+            end: duration, sampleRate, channels, signal,
+          });
+          const wav = encodeWav(mixed.channels, sampleRate);
+          audioPath = await joinPath(root, 'audio.wav');
+          await writeBlob(audioPath, wav);
+        }
+      } catch (err) {
+        if (err?.name === 'AbortError') throw err;
+        diag({ nativeAudioFailed: String(err?.message || err) });
+        audioPath = null;
+      }
+    }
+
     onProgress?.({ phase: 'finalizing', done: total, total, fraction: 1, elapsed: (performance.now() - started) / 1000, remaining: 0 });
-    await invokeNative('encode_h264', { framesDir, fps, width, height, bitrate, outputPath });
+    const payload = { framesDir, fps, width, height, bitrate, outputPath };
+    if (audioPath) payload.audioPath = audioPath;
+    await invokeNative('encode_h264', payload);
     const file = await readFile(outputPath);
     if (!file || !file.dataBase64) throw new Error('编码完成但读回失败');
     const blob = base64ToBlob(file.dataBase64, 'video/mp4');
@@ -215,7 +247,7 @@ export async function exportVideoNativeH264({
       fileName: outputName, mimeType: 'video/mp4',
       width, height, frames: total, duration,
       elapsed, fps: total / Math.max(0.001, elapsed),
-      codec: 'avc', hardware: true, native: true,
+      codec: 'avc', hardware: true, native: true, audioCodec: audioPath ? 'aac' : null,
     };
   } finally {
     // 帧目录 + 中间产物用完即删（几十上百个 JPEG，不该留在磁盘上）。
