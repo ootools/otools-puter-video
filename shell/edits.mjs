@@ -384,6 +384,36 @@ const canSaveLocally = () => hostReady();`,
   },
   {
     file: 'src/ui/export-dialog.js',
+    find: `    const rows = results.map((r) => {
+      const status = h('p.export-file-status', { role: 'status' });
+`,
+    replace: `    const rows = results.map((r) => {
+      const status = h('p.export-file-status', { role: 'status' });
+      // 原生 H.264 路径：导出时已直接写进用户选定的文件（大视频不进内存），
+      // 这里不再给「另存为 / 下载」，只显示落盘路径 + 「在文件夹中显示」。
+      if (r.saved) {
+        const size = r.blob ? r.blob.size : (r.size || 0);
+        const meta = \`\${r.width} x \${r.height}, \${clock(r.duration)}, \${formatBytes(size)}\`;
+        status.textContent = \`Saved to \${r.path}\`;
+        const reveal = hostReady() ? h('button.btn', { type: 'button' }, icon('folderOpen', 16), 'Show in folder') : null;
+        reveal?.addEventListener('click', () => revealExportPath(r.path));
+        return h('li.export-file',
+          h('span.export-file-icon', icon('fileVideo', 20)),
+          h('div.export-file-text', h('span.export-file-name', r.fileName), h('span.export-file-meta', meta), status),
+          h('div.export-file-actions', reveal));
+      }
+`,
+    expect: 1,
+    why: '已直接落盘的导出结果：不再重复弹保存框，只显示路径 + 在文件夹中显示',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: "    if (s.destination !== 'puter' || !cloud) for (const r of results) await download(r);",
+    replace: "    if (s.destination !== 'puter' || !cloud) for (const r of results) if (!r.saved) await download(r);",
+    why: '已直接落盘的结果不再触发下载/另存',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
     find: " * view with a live thumbnail, then a result view with Download and Save to\n * Puter. Settings are remembered per device.",
     replace: " * view with a live thumbnail, then a result view with Save as and Save to the\n * Videos folder. Settings are remembered per device.",
     why: '文件头注释里的描述',
@@ -431,7 +461,7 @@ const canSaveLocally = () => hostReady();`,
   {
     file: 'src/ui/export-dialog.js',
     find: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos } from '../otools/ui.js';",
-    replace: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos } from '../otools/ui.js';\nimport { probeCodecs, summarizeProbes } from '../otools/codec-probe.js';\nimport { nativeH264Reason, nativeH264Available, installFfmpeg, reprobeNativeH264 } from '../otools/native-encoder.js';",
+    replace: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos, chooseExportPath, revealExportPath } from '../otools/ui.js';\nimport { probeCodecs, summarizeProbes } from '../otools/codec-probe.js';\nimport { nativeH264Reason, nativeH264Available, installFfmpeg, reprobeNativeH264 } from '../otools/native-encoder.js';",
     expect: 1,
     why: '诊断：导入裸 WebCodecs 探测 + 原生 H.264 状态，卡住时告诉用户到底哪个编码真出不了帧、原生为什么没走',
   },
@@ -653,6 +683,30 @@ export function currentExportParams() {
     expect: 1,
     why: '原生 H.264 快路径：导入移植层的原生编码入口',
   },
+  /* ============ 原生 H.264：渲染前先选目标文件，ffmpeg 直接写（大视频不进内存） ============ */
+  // choosePath 由导出对话框传进来（拿到 base 文件名 → 返回最终绝对路径，取消返回 null）。
+  // 只走原生 H.264 路径时才会被调用；WebCodecs 路径仍是「渲染完再另存」。
+  {
+    file: 'src/engine/exporter.js',
+    find: "export async function exportProject(project, library, settings, { kind = 'video', onProgress, signal, target: forceTarget } = {}) {",
+    replace: "export async function exportProject(project, library, settings, { kind = 'video', onProgress, signal, target: forceTarget, choosePath } = {}) {",
+    expect: 1,
+    why: '透传「先选目标文件」回调（仅原生 H.264 用）',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "  return kind === 'audio' ? exportAudio(snap, library, s, duration, base, { onProgress, signal, forceTarget }) : exportVideo(snap, library, s, duration, base, { onProgress, signal, forceTarget });",
+    replace: "  return kind === 'audio' ? exportAudio(snap, library, s, duration, base, { onProgress, signal, forceTarget }) : exportVideo(snap, library, s, duration, base, { onProgress, signal, forceTarget, choosePath });",
+    expect: 1,
+    why: '把 choosePath 传给 exportVideo',
+  },
+  {
+    file: 'src/engine/exporter.js',
+    find: "async function exportVideo(project, library, s, duration, base, { onProgress, signal, forceTarget }) {",
+    replace: "async function exportVideo(project, library, s, duration, base, { onProgress, signal, forceTarget, choosePath }) {",
+    expect: 1,
+    why: 'exportVideo 接收 choosePath',
+  },
   {
     file: 'src/engine/exporter.js',
     find: `  const total = frameCount(duration, fps);
@@ -666,12 +720,19 @@ export function currentExportParams() {
   // 里用工程混音成 WAV，一并交给 ffmpeg 封进 MP4（AAC）。任一条件不满足就继续走下面的
   // WebCodecs 管线（VP9/WebM 在浏览器里可靠）。
   if (s.video && !s.gif && s.codec === 'avc' && s.format === 'mp4' && (await nativeH264Available())) {
+    // 先定目标文件，再渲染：ffmpeg 直接把最终 MP4 写进去，不把整段视频读进内存
+    // （大视频在内存里会爆）。用户取消另存对话框 → 抛 AbortError，回到导出设置。
+    let nativeOutputPath = null;
+    if (choosePath) {
+      nativeOutputPath = await choosePath(\`\${base}.mp4\`);
+      if (!nativeOutputPath) throw Object.assign(new Error('Export canceled'), { name: 'AbortError' });
+    }
     exportStage = '原生编码（ffmpeg）';
     const nativeRenderer = new FrameRenderer(project, library, width, height);
     try {
       return await exportVideoNativeH264({
         width, height, fps, bitrate, total, duration, name: base,
-        signal, onProgress,
+        signal, onProgress, outputPath: nativeOutputPath,
         // 音轨：和上游一致，只在勾选音频时才混；具体有无可听片段由 native-encoder 判定。
         audio: s.includeAudio ? { project, library } : null,
         renderFrame: async (i) => { await nativeRenderer.render(frameTime(i, fps)); return nativeRenderer.canvas; },
@@ -683,6 +744,22 @@ export function currentExportParams() {
   exportStage = '检测编码能力';`,
     expect: 1,
     why: '原生 H.264 快路径：H.264/MP4 + 宿主可用时走 ffmpeg 硬件编码，否则回落 WebCodecs',
+  },
+  {
+    file: 'src/ui/export-dialog.js',
+    find: `          signal: controller.signal,
+          onProgress: (p) => {`,
+    replace: `          signal: controller.signal,
+          // 原生 H.264 路径会在渲染前先弹保存框（目的地选「视频目录」则不弹、直接定路径），
+          // 让 ffmpeg 直接写最终文件——大视频不进内存。其它编码/任务忽略这个回调。
+          choosePath: kind === 'video' ? (fileName) => chooseExportPath(fileName, {
+            folder: s.destination === 'puter',
+            title: 'Save export',
+            filters: [{ name: 'MP4', extensions: ['mp4'] }],
+          }) : undefined,
+          onProgress: (p) => {`,
+    expect: 1,
+    why: '把「先选目标文件」回调交给导出管线（仅原生 H.264 会用到）',
   },
 
   /* ===== 导出卡 0% 看门狗：编码无进度时给出明确报错，而不是永远停在 0% ===== */

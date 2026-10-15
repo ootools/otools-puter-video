@@ -2608,6 +2608,7 @@ export default {
   'Choose where to save it.': '选择保存位置。',
   'Save cancelled.': '已取消保存。',
   'Could not save the file.': '无法保存文件。',
+  'Show in folder': '在文件夹中显示',
 
   /* ══════════════════ 导出对话框：控件与标题 ══════════════════ */
   /* 这一批是导出对话框里还没翻掉的控件标签与弹窗标题，爬出来后补的。 */

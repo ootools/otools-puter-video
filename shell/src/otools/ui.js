@@ -75,6 +75,33 @@ export async function saveBlobToVideos(blob, fileName) {
   return target;
 }
 
+/**
+ * 导出前先选目标文件。
+ *
+ * 原生 H.264 路径由 ffmpeg 直接写最终文件（大视频不进内存），所以要在渲染**之前**
+ * 就拿到路径。两种目的地：
+ *   - folder=true（导出对话框选「视频目录」）：不弹框，返回 Videos 目录下去重后的路径。
+ *   - folder=false：弹宿主另存对话框，取消返回 null（调用方据此中止导出）。
+ *
+ * @returns {Promise<string|null>} 目标绝对路径；取消 / 宿主不可用返回 null。
+ */
+export async function chooseExportPath(fileName, { folder = false, title = 'Save export', filters } = {}) {
+  if (!hostReady()) return null;
+  if (folder) {
+    const videos = host.knownPath('videos') || host.knownPath('documents') || host.knownPath('home');
+    if (!videos) return host.pickSavePath({ title: t(title), defaultPath: fileName, filters });
+    await host.createDir(videos);
+    const taken = new Set((await host.listDir(videos)).map((e) => e.name));
+    return host.joinPath(videos, dedupeName(fileName, taken));
+  }
+  return host.pickSavePath({ title: t(title), defaultPath: fileName, filters });
+}
+
+/** 在系统文件管理器里定位导出结果（宿主不支持这个能力时静默忽略）。 */
+export function revealExportPath(path) {
+  if (path) host.revealPath(path);
+}
+
 /* --------------------------------------------------------- 工程目录卡片 */
 
 /** 工程目录的显示名（太长时只留尾部两段，避免把侧栏撑开）。 */

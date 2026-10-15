@@ -188,6 +188,8 @@ export const patterns = [
 
   [/^Estimated size (.+)$/, (m) => `预计大小 ${m[1]}`],
   [/^Length (.+)$/, (m) => `时长 ${m[1]}`],
+  // 导出结果状态行：`Saved to /path/to/file.mp4`（路径是数据，原样保留）
+  [/^Saved to (.+)$/, (m) => `已保存到 ${m[1]}`],
   // `${w} x ${h}  ${fps} fps`
   [/^(\d+) x (\d+)  (\d+) fps$/, (m) => `${m[1]} x ${m[2]}  ${m[3]} 帧/秒`],
   // `${w} x ${h}, ${比例}, ${fps} fps`

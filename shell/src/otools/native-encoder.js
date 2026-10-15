@@ -7,17 +7,22 @@
  * h264_videotoolbox）** 又快又稳。
  *
  * 数据流：调用方逐帧渲染成 canvas → 这里编成 JPEG(base64) → host.writeFile 落到临时
- * 目录的 `%06d.jpg` → 调原生 `encode_h264` 让 ffmpeg 一次性编成 H.264/MP4 → readFile
- * 读回成 blob（交给既有保存流程）。音轨：调用方把工程交给这里，用上游的离线混音
- * (`renderAudio`) 生成 16-bit PCM WAV 落盘，再让 ffmpeg 一起封进 MP4（AAC）——这样
- * 声音走的是和 WebCodecs 管线完全相同的混音，只是封装交给 ffmpeg。临时目录用完即删。
+ * 目录的 `%06d.jpg` → 调原生 `encode_h264` 让 ffmpeg 编成 H.264/MP4。音轨：调用方把工程
+ * 交给这里，用上游的离线混音 (`renderAudio`) 生成 16-bit PCM WAV 落盘，再让 ffmpeg 一起
+ * 封进 MP4（AAC）——声音走的是和 WebCodecs 管线完全相同的混音，只是封装交给 ffmpeg。
+ *
+ * 落盘两种模式：
+ *   - 给了 `outputPath`（导出对话框在渲染前先让用户选了目标文件）：ffmpeg **直接写它**，
+ *     不读回内存，结果带 `saved:true` + `path`。大视频也不会把整段 MP4 塞进内存。
+ *   - 没给：写临时目录后 `readFile` 读回成 blob，交给调用方的保存流程（与从前一致）。
+ * 临时目录（帧 + 中间产物）用完即删；用户选定的输出文件在临时目录之外，不会被删。
  *
  * 这是移植层自己的模块，宿主不在 / 非 mac / 没装 ffmpeg 时 `nativeH264Available()`
  * 返回 false，上游导出管线**原样回落**到 WebCodecs（VP9/WebM），行为与从前一致。
  */
 import {
   available, channel, env, knownPath, joinPath, createDir, removeEntry,
-  writeFile, writeBlob, readFile, base64ToBlob, bytesToBase64, invokeNative, diag,
+  writeFile, writeBlob, readFile, base64ToBlob, bytesToBase64, invokeNative, diag, baseName,
 } from './host.js';
 import { renderAudio, encodeWav } from '../engine/audio-mix.js';
 import { audibleClips } from '../engine/scene.js';
@@ -165,18 +170,25 @@ const yieldToEventLoop = () => new Promise((r) => setTimeout(r, 0));
  * @param {AbortSignal} [o.signal]
  * @param {Function} [o.onProgress] 与 upstream 管线同形：{ phase, done, total, fraction, elapsed, remaining, preview? }
  * @param {(i:number)=>Promise<HTMLCanvasElement>} o.renderFrame 渲染第 i 帧并返回画布
+ * @param {string}   [o.outputPath] 用户选定的最终文件路径。给了就让 ffmpeg **直接写它**，
+ *        不再把整段 MP4 读回内存（大视频会爆内存）；返回结果带 `saved:true` + `path`。
+ *        不给（宿主不在 / 没先选路径）则写临时目录后读回成 blob，行为与从前一致。
  * @param {{project:object,library:object,sampleRate?:number,channels?:number}} [o.audio]
  *        给了就混音成 WAV 并封进 MP4；无工程/无音轨/混音失败 → 导出无声视频（不致命）。
  */
 export async function exportVideoNativeH264({
   width, height, fps, bitrate, total, duration, name,
-  signal, onProgress, renderFrame, audio,
+  signal, onProgress, renderFrame, audio, outputPath,
 }) {
   const root = await makeScratchDir('native-h264');
   const framesDir = await joinPath(root, 'frames');
   await createDir(framesDir);
   const outputName = `${name || 'export'}.mp4`;
-  const outputPath = await joinPath(root, outputName);
+  const scratchOutput = await joinPath(root, outputName);
+  // 有用户选定的路径就直接写它；否则先写临时目录、最后读回成 blob。
+  const chosen = typeof outputPath === 'string' ? outputPath.trim() : '';
+  const finalPath = chosen || scratchOutput;
+  const savedToUser = Boolean(chosen);
   const started = performance.now();
   let audioPath = null;
   try {
@@ -235,13 +247,26 @@ export async function exportVideoNativeH264({
     }
 
     onProgress?.({ phase: 'finalizing', done: total, total, fraction: 1, elapsed: (performance.now() - started) / 1000, remaining: 0 });
-    const payload = { framesDir, fps, width, height, bitrate, outputPath };
+    const payload = { framesDir, fps, width, height, bitrate, outputPath: finalPath };
     if (audioPath) payload.audioPath = audioPath;
-    await invokeNative('encode_h264', payload);
-    const file = await readFile(outputPath);
+    const encoded = await invokeNative('encode_h264', payload);
+    const elapsed = (performance.now() - started) / 1000;
+
+    // 直接写进用户选定的文件：不再读回内存，只把落盘路径与体积报回去。
+    if (savedToUser) {
+      return {
+        kind: 'video', saved: true, path: finalPath, size: Number(encoded?.bytes) || 0,
+        blob: null, release() {},
+        fileName: baseName(finalPath) || outputName, mimeType: 'video/mp4',
+        width, height, frames: total, duration,
+        elapsed, fps: total / Math.max(0.001, elapsed),
+        codec: 'avc', hardware: true, native: true, audioCodec: audioPath ? 'aac' : null,
+      };
+    }
+
+    const file = await readFile(finalPath);
     if (!file || !file.dataBase64) throw new Error('编码完成但读回失败');
     const blob = base64ToBlob(file.dataBase64, 'video/mp4');
-    const elapsed = (performance.now() - started) / 1000;
     return {
       kind: 'video', blob, release() {},
       fileName: outputName, mimeType: 'video/mp4',
@@ -250,7 +275,8 @@ export async function exportVideoNativeH264({
       codec: 'avc', hardware: true, native: true, audioCodec: audioPath ? 'aac' : null,
     };
   } finally {
-    // 帧目录 + 中间产物用完即删（几十上百个 JPEG，不该留在磁盘上）。
+    // 帧目录 + 中间产物用完即删（几十上百个 JPEG，不该留在磁盘上）。用户选定的输出
+    // 文件在 root 之外，不会被这里删掉。
     await removeEntry(root).catch(() => {});
   }
 }

@@ -15,6 +15,7 @@ vi.mock('../src/otools/host.js', () => {
     invokeThrows: false,
     writes: [],
     blobs: [],
+    reads: [],
     removed: [],
     encodes: [],
     removedOK: true,
@@ -28,11 +29,12 @@ vi.mock('../src/otools/host.js', () => {
     env: () => ({ platform: 'darwin' }),
     knownPath: (name) => (name === 'home' ? '' : '/tmp/otools-test'),
     joinPath: (...parts) => parts.filter((p) => typeof p === 'string' && p).join('/'),
+    baseName: (p) => String(p || '').split('/').pop(),
     createDir: async () => {},
     removeEntry: async (p) => { mock.removed.push(p); },
     writeFile: async (path) => { mock.writes.push(path); },
     writeBlob: async (path) => { mock.blobs.push(path); },
-    readFile: async (path) => ({ path, dataBase64: 'QUFB' }),
+    readFile: async (path) => { mock.reads.push(path); return { path, dataBase64: 'QUFB' }; },
     base64ToBlob: (b64, mime) => ({ __blob: true, mime, b64 }),
     bytesToBase64: (bytes) => 'QUJD',
     diag: () => {},
@@ -95,6 +97,7 @@ beforeEach(() => {
   mock.invokeThrows = false;
   mock.writes = [];
   mock.blobs = [];
+  mock.reads = [];
   mock.removed = [];
   mock.encodes = [];
   mock.installResult = { success: true, command: 'brew install ffmpeg', stdout: 'ok', stderr: '' };
@@ -252,6 +255,43 @@ describe('exportVideoNativeH264 · 音轨', () => {
     expect(audioMock.calls).toHaveLength(0);
     expect(mock.encodes[0].audioPath).toBeUndefined();
     expect(result.audioCodec).toBeNull();
+  });
+});
+
+describe('exportVideoNativeH264 · 直接写目标文件', () => {
+  it('给了 outputPath：ffmpeg 直接写它，不读回内存，结果带 saved/path/size', async () => {
+    const target = '/Users/me/Movies/clip.mp4';
+    const result = await exportVideoNativeH264({
+      width: 1280, height: 720, fps: 30, bitrate: 5_000_000,
+      total: 3, duration: 3_000_000, name: 'clip',
+      outputPath: target,
+      renderFrame: async () => fakeCanvas(),
+    });
+    // 编码直接落在用户选定的路径上。
+    expect(mock.encodes).toHaveLength(1);
+    expect(mock.encodes[0].outputPath).toBe(target);
+    // 没有把整段 MP4 读回内存。
+    expect(mock.reads).toHaveLength(0);
+    // 结果标记为已落盘：带路径 + 体积（来自原生返回的 bytes），没有 blob。
+    expect(result.saved).toBe(true);
+    expect(result.path).toBe(target);
+    expect(result.size).toBe(4);
+    expect(result.blob).toBeNull();
+    expect(result.fileName).toBe('clip.mp4');
+    // 临时目录照样清掉。
+    expect(mock.removed).toHaveLength(1);
+  });
+
+  it('没给 outputPath：写临时目录并读回成 blob（原行为不变）', async () => {
+    const result = await exportVideoNativeH264({
+      width: 640, height: 360, fps: 30, bitrate: 2_000_000,
+      total: 2, duration: 2_000_000, name: 'scratch',
+      renderFrame: async () => fakeCanvas(),
+    });
+    expect(mock.reads).toHaveLength(1);
+    expect(mock.reads[0]).toMatch(/scratch\.mp4$/);
+    expect(result.saved).toBeUndefined();
+    expect(result.blob.__blob).toBe(true);
   });
 });
 
