@@ -16,6 +16,7 @@
    | 1~5 行的局部改动（去掉一个入口、换一句文案、把 Puter 换成宿主） | `shell/edits.mjs` |
    | 整块功能要拿掉（评审、云） | `shell/drop.mjs` |
    | 移植层自己的测试 | `shell/tests/`（拷到 `.build/tests/`，与上游测试同一个 vitest 进程） |
+   | 需要宿主原生能力（硬件编码等） | `native/`（Rust cdylib）+ `shell/src/otools/` 里的调用包装；产物 `lib/<platform>.dylib` 由 `scripts/build-native.mjs` 生成 |
 3. **`shell/edits.mjs` 的每一条都必须能命中**。`expect` 是硬约束：上游改了那段代码，
    构建会报「命中 N 次，期望 M 次」并打印是哪一条、为什么改。**不要为了让构建过而放宽 `expect`**，
    要去读上游的新代码，把 `find`/`replace` 更新到新的形状。
@@ -47,17 +48,20 @@
 | `shell/overlay/index.html` | 入口：不加载 Puter SDK；主题跟随 OTools（宿主已经把 `dark`/`light` 类打在 `documentElement` 上） |
 | `shell/overlay/vite.config.js` | 产物落 `../dist`；`base: './'`；`server.fs.allow: ['..']` |
 | `shell/overlay/src/main.js` | 启动：宿主可用 → 本机目录；否则 → 上游的 OPFS 兜底。评审路由与 `puter.ui` 钩子删除 |
-| `shell/src/otools/host.js` | 宿主桥：`window.otoolsVideo`（对话框 / 读写 / 列目录 / 建目录 / 删除 / 重命名 / 主题 / 诊断） |
+| `shell/src/otools/host.js` | 宿主桥：`window.otoolsVideo`（对话框 / 读写 / 列目录 / 建目录 / 删除 / 重命名 / 主题 / 诊断 / `invokeNative`） |
 | `shell/src/otools/backend.js` | `otoolsBackend`：实现上游 `storage/backends.js` 的接口，落到本机目录 |
-| `shell/src/otools/ui.js` | 界面胶水：工程目录卡片、`saveBlobAs`、`saveBlobToVideos`、`hostMessage` |
+| `shell/src/otools/ui.js` | 界面胶水：工程目录卡片、`saveBlobAs`、`saveBlobToVideos`、`chooseExportPath`、`hostMessage` |
+| `shell/src/otools/native-encoder.js` | 原生 H.264 编码器：逐帧 JPEG → ffmpeg（`h264_videotoolbox`）→ MP4；含音轨混音与「直接写目标文件」模式 |
+| `shell/src/otools/codec-probe.js` | 裸 WebCodecs 编码探测：卡住时说清「哪个编码真出不了帧」 |
 | `shell/src/otools/i18n.js` | 多语言运行时：读宿主语言、三条监听、用户覆盖、`t()`（精确词条→模式→原文）、给菜单用的语言项 |
 | `shell/src/otools/i18n.zh-CN.js` | 简体中文词典（键 = 英文原文，逐字符一致） |
 | `shell/src/otools/i18n.patterns.zh-CN.js` | 模式表：带插值的文案（相对时间、卡片读数、控件名前缀、导出读数、窗口标题）按形状认，anchored 正则 |
 | `shell/src/otools/dom-i18n.js` | DOM 翻译层：精确匹配 + 模式应用、只跳叶子用户内容节点（不跳我们自己的目录标签）、`document.title` 也翻、可逆、`missingReport()` 给 crawl 用 |
 | `shell/src/otools/theme-sync.js` | 主题跟随宿主（「跟随，直到用户自己选」） |
-| `shell/edits.mjs` | 53 条局部改动（评审入口、Puter 文案、导出改宿主、保存图标、语言菜单） |
+| `native/` | Rust cdylib（`libotools_video_native.dylib`）：探活 ffmpeg、组命令跑 `h264_videotoolbox`、一键 `brew install ffmpeg`。产物 `lib/<platform>.dylib` 由 `scripts/build-native.mjs` 生成 |
+| `shell/edits.mjs` | 局部改动清单（评审入口、Puter 文案、导出改宿主、原生 H.264 快路径、保存图标、语言菜单） |
 | `shell/drop.mjs` | 从构建树里删掉的路径（评审、上游的假 Puter 夹具）+ 删完之后必须还在的文件清单 |
-| `shell/tests/` | 移植层测试：i18n 运行时 + DOM 翻译层的边界（39 个用例） |
+| `shell/tests/` | 移植层测试：i18n 运行时 / DOM 翻译层 / 原生编码器 / 编码探测 / 导出卡死 |
 
 ## 多语言的规矩
 

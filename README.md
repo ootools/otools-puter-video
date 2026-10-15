@@ -33,18 +33,26 @@ otools-video/
 │   ├── src/otools/              #   新增模块，拷到构建树的 src/otools/
 │   │   ├── host.js              #     宿主桥：对话框、读写、列目录、建目录、删除、重命名
 │   │   ├── backend.js           #     工程库后端：实现上游 storage/backends.js 的接口
-│   │   ├── ui.js                #     界面胶水：工程目录卡片、另存、存到视频目录
+│   │   ├── ui.js                #     界面胶水：工程目录卡片、另存、存到视频目录、先选导出路径
+│   │   ├── native-encoder.js    #     原生 H.264 编码器：逐帧 JPEG → ffmpeg 硬件编码（含音轨）
+│   │   ├── codec-probe.js       #     裸 WebCodecs 编码探测（卡住时报「哪个编码真出不了帧」）
 │   │   ├── i18n.js              #     多语言运行时：跟随宿主、可覆盖、实时切换
 │   │   ├── i18n.zh-CN.js        #     简体中文词典（英文原文 → 译文）
+│   │   ├── i18n.patterns.zh-CN.js #   带插值文案的模式表（anchored 正则）
 │   │   ├── dom-i18n.js          #     DOM 翻译层：把上游界面上的英文换成译文
 │   │   └── theme-sync.js        #     主题跟随宿主
 │   ├── edits.mjs                #   外科手术式字符串替换清单（逐条校验命中次数）
 │   ├── drop.mjs                 #   从构建树里删掉的上游文件（评审、云、上游开发夹具）
-│   └── tests/                   #   移植层自己的测试（i18n 运行时与 DOM 翻译层的边界）
+│   └── tests/                   #   移植层自己的测试（i18n、原生编码器、编码探测…）
+├── native/                      #   原生插件（Rust cdylib）：ffmpeg shell-out 硬件 H.264
+│   ├── Cargo.toml               #     crate-type = cdylib；产出 libotools_video_native.dylib
+│   └── src/lib.rs               #     探活 ffmpeg / 组命令 / 跑编码 / 一键安装 ffmpeg
+├── lib/                         #   原生库产物（macOS.dylib，构建生成，.gitignore）
 ├── scripts/
 │   ├── sync-upstream.mjs        #   稀疏拉取上游快照 + 写 upstream.lock.json + --check
 │   ├── tree.mjs                 #   合成 .build/（overlay + edits + drops + 清扫）
 │   ├── build.mjs                #   node scripts/build.mjs  → dist/
+│   ├── build-native.mjs         #   cargo build --release → lib/macOS.dylib
 │   ├── dev.mjs                  #   node scripts/dev.mjs    → vite dev（HMR，端口 5517）
 │   ├── test.mjs                 #   跑上游的测试套件 + 移植层测试，都在移植后的构建树上
 │   ├── i18n-report.mjs          #   多语言覆盖率 / 重复键 / 缺口清单
@@ -137,6 +145,10 @@ node scripts/sync-upstream.mjs --check  # 校验 upstream/ 有没有被人就地
 查找替换）、文字与文字模板、音频（波形、音量、淡入淡出、降噪、变声、声道）、
 快照、撤销历史、项目模板、回收站、项目文件（.zip）导入导出、
 **导出**（H.264/HEVC/VP9/AV1，MP4/WebM/MOV/GIF/静帧/WAV/SRT，480p–4K，24–60fps）。
+
+其中 **H.264/MP4 在 macOS 上走宿主的原生硬件编码**（见下「原生 H.264 导出」）：浏览器
+WebCodecs 的 H.264 在部分 WKWebView 里会静默挂死，所以插件把这条路径交给宿主自带的
+ffmpeg（`h264_videotoolbox`），又快又稳，且**先选保存位置、再直接写文件**（大视频不进内存）。
 
 ### 工程目录
 
@@ -319,7 +331,36 @@ SHA256SUMS 覆盖与匹配、无 `devUrl`/`quickDev`、ZIP 条目无重复/无�
 - 入口 HTML 里**不能有指向 `puter.com` 的 `<script src>`**。
 
 **本地安装**：OTools 插件市场 → 安装本地插件 → 选 `.oplg`（`.zip` 也行），
-或把 `dist-pack/` 下那份扁平目录整个丢进宿主插件目录。插件是纯前端，不注册 native dylib。
+或把 `dist-pack/` 下那份扁平目录整个丢进宿主插件目录。
+
+包内除了前端产物，还带一个原生库 **`lib/macOS.dylib`**（`native/` 编出来的 Rust cdylib），
+供 macOS 上的原生 H.264 导出使用。没装 ffmpeg 时原生路径自动回落 WebCodecs，插件照常能用。
+
+```bash
+node scripts/build-native.mjs     # 重新编原生库（需要 cargo；只影响 macOS）
+```
+
+---
+
+## 原生 H.264 导出（macOS）
+
+浏览器 WebCodecs 的 H.264 在部分 WKWebView 里会**静默挂死**（`isConfigSupported()` 说支持，
+编到第 8 帧左右就没有进度了），VP9 是软件编码能跑完但慢。所以插件在 macOS 上把
+**H.264 / MP4** 这条路径交给宿主自带的 **ffmpeg 硬件编码（`h264_videotoolbox`）**：
+
+1. 逐帧渲染成 JPEG 落到临时目录（在磁盘上，不占内存）；
+2. 音轨用上游同一套离线混音渲成 16-bit PCM WAV；
+3. ffmpeg 一次性编成 H.264/MP4（AAC 音轨），**直接写进你选的保存位置**——不再把整段
+   视频读回内存，所以几 GB 的片子也不会爆内存。
+
+**依赖 ffmpeg**（要带 `h264_videotoolbox`）。没装时导出设置里会**主动提示**并提供
+**「一键安装 ffmpeg」**按钮（走 Homebrew）；也可以自己 `brew install ffmpeg`。
+装好后重开插件即可生效。没装 ffmpeg / 非 macOS 时，导出自动回落 WebCodecs（VP9/WebM 等），
+行为与从前一致。
+
+> 排查：如果 ffmpeg 装了但原生路径仍没生效，多半是旧 `.oplg` 里的 `.dylib` 被宿主缓存了
+> （生产清单里 `native.autoReload: false`）——重装插件或重启 OTools 即可；再确认
+> `ffmpeg -encoders | grep h264_videotoolbox` 有输出。
 
 ---
 
@@ -354,8 +395,9 @@ node scripts/build.mjs              # 有红就是某条 edit 对不上上游了
   代价是每次进入工程要把用到的素材各读一遍（读过之后整场会话留在内存里，与上游的本地模式一致）。
   想省这一次读盘，就把 `src/storage/library.js` 的缓存条件放宽到 `otools`——
   代价是素材会在浏览器里再存一份。
-- **导出走系统另存对话框**：有宿主时，导出完成的每个文件都会弹一次另存对话框
-  （多时间线导出就是多个对话框，串行）。想不弹窗就用导出设置里的「Videos folder」目的地。
+- **导出走系统另存对话框**：有宿主时，原生 H.264 会在**渲染前**先弹一次另存对话框
+  （之后直接写该文件，不再弹）；其它编码/多文件任务仍是每个文件弹一次（串行）。
+  想完全不弹窗就用导出设置里的「Videos folder」目的地。
 - **AI 功能全部不可用**，相关面板显示「本插件不接云端 AI」。
 - **上游界面靠运行时翻译**：词典覆盖 95% 的候选文案（按出现次数 96%），
   剩下的是字体名 / 编码名 / 曲名 / 已删掉的评审功能。没翻到的保持英文。
