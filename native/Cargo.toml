@@ -1,11 +1,11 @@
 [package]
-name = "otools-video-native"
+name = "otools-puter-video-native"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]
-name = "otools_video_native"
+name = "otools_puter_video_native"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

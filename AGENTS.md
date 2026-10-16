@@ -1,4 +1,4 @@
-# AGENTS.md —— otools-video 移植约定
+# AGENTS.md —— otools-puter-video 移植约定
 
 给后续接手这个仓库的 agent（和人）的规则。核心一句话：**`upstream/` 一行都不要改**，
 所有移植代码都放在 `shell/`，这样每次跟进上游都只是「重新叠加一次」。
@@ -58,7 +58,7 @@
 | `shell/src/otools/i18n.patterns.zh-CN.js` | 模式表：带插值的文案（相对时间、卡片读数、控件名前缀、导出读数、窗口标题）按形状认，anchored 正则 |
 | `shell/src/otools/dom-i18n.js` | DOM 翻译层：精确匹配 + 模式应用、只跳叶子用户内容节点（不跳我们自己的目录标签）、`document.title` 也翻、可逆、`missingReport()` 给 crawl 用 |
 | `shell/src/otools/theme-sync.js` | 主题跟随宿主（「跟随，直到用户自己选」） |
-| `native/` | Rust cdylib（`libotools_video_native.dylib`）：探活 ffmpeg、组命令跑 `h264_videotoolbox`、一键 `brew install ffmpeg`。产物 `lib/<platform>.dylib` 由 `scripts/build-native.mjs` 生成 |
+| `native/` | Rust cdylib（`libotools_puter_video_native.dylib`）：探活 ffmpeg、组命令跑 `h264_videotoolbox`、一键 `brew install ffmpeg`。产物 `lib/<platform>.dylib` 由 `scripts/build-native.mjs` 生成 |
 | `shell/edits.mjs` | 局部改动清单（评审入口、Puter 文案、导出改宿主、原生 H.264 快路径、保存图标、语言菜单） |
 | `shell/drop.mjs` | 从构建树里删掉的路径（评审、上游的假 Puter 夹具）+ 删完之后必须还在的文件清单 |
 | `shell/tests/` | 移植层测试：i18n 运行时 / DOM 翻译层 / 原生编码器 / 编码探测 / 导出卡死 |

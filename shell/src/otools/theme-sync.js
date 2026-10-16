@@ -16,7 +16,7 @@
  * Theme 菜单）。两者不能打架，规则是「**我们跟随，直到用户自己选**」：
  *
  *   - 我们跟随宿主时会把值写进 `video-studio:theme`，同时把写过的值记在
- *     `otools-video.theme-followed`；
+ *     `otools-puter-video.theme-followed`；
  *   - 下次如果 `video-studio:theme` 与记下的值不一样，说明是用户在 Theme
  *     菜单里自己选的 → 从此不再跟随；
  *   - 用户在菜单里选回跟宿主一样的值时，跟随会重新生效（无害）。
@@ -27,7 +27,7 @@ import { getTheme, setTheme } from '../ui/prefs.js';
 /** 上游的主题键。 */
 const THEME_KEY = 'video-studio:theme';
 /** 我们上次「跟随宿主」写进去的值。 */
-const FOLLOWED_KEY = 'otools-video.theme-followed';
+const FOLLOWED_KEY = 'otools-puter-video.theme-followed';
 
 function read(key) {
   try {

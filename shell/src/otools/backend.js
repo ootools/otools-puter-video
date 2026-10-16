@@ -22,7 +22,7 @@ import * as host from './host.js';
 import { t } from './i18n.js';
 
 /** 工程目录记在 localStorage：跨插件重启仍然记得。 */
-const ROOT_KEY = 'otools-video.root';
+const ROOT_KEY = 'otools-puter-video.root';
 /** 目录里放一个标记文件，用户改到别的目录时能看出这是本插件的工程目录。 */
 const MARKER = 'video-studio.json';
 /** 默认目录名（宿主路径 + 这一层）。 */
@@ -83,7 +83,7 @@ export async function setRoot(path) {
 /** 目录里的标记文件内容：给人看，也给将来做版本迁移留个位。 */
 function markerPayload(root) {
   return {
-    app: 'otools-video',
+    app: 'otools-puter-video',
     name: 'Video Studio',
     root,
     note: t('This folder is the Video Studio plugin project library. Projects, covers and imported media live here as plain files.'),
@@ -144,7 +144,7 @@ export function otoolsBackend(root) {
       // base64（约 1.33 倍大小）。几百 MB 还能忍，上 GB 会很慢甚至把 webview
       // 撑爆——这里留个明确的痕迹，免得事后只看到「导入卡住」。
       if (blob.size > LARGE_FILE_BYTES) {
-        console.warn(`[otools-video] writing a ${(blob.size / 1048576).toFixed(0)} MB media file through base64 IPC; this will be slow: ${path}`);
+        console.warn(`[otools-puter-video] writing a ${(blob.size / 1048576).toFixed(0)} MB media file through base64 IPC; this will be slow: ${path}`);
         host.diag({ lastLargeWrite: path, bytes: blob.size });
       }
       await host.writeBlob(target, blob);

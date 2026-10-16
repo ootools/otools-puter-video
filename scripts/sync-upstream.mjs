@@ -151,7 +151,7 @@ function main() {
     sourceDir = path.resolve(from, SUBPATH);
     if (!fs.existsSync(sourceDir)) throw new Error(`--from 里没有 ${SUBPATH}：${sourceDir}`);
   } else {
-    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'otools-video-upstream-'));
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'otools-puter-video-upstream-'));
     console.log(`稀疏克隆 ${REPO} @ ${ref} → ${tempDir}`);
     // --filter=blob:none + --sparse：只下要的那棵子树，1.7 GB 的仓库几秒就够。
     run('git', ['clone', '--depth', '1', '--filter=blob:none', '--sparse', '--branch', ref, REPO_URL, tempDir]);

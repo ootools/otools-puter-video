@@ -42,7 +42,7 @@
 
 import { t } from './i18n.js';
 
-const DIAG_KEY = 'otools-video.diag';
+const DIAG_KEY = 'otools-puter-video.diag';
 /* ------------------------------------------------------------------ 工具 */
 
 /** 诊断面包屑：插件没有 devtools，localStorage 是事后唯一能看到内部状态的渠道。 */
@@ -190,7 +190,7 @@ function nativeWrapper() {
  * 插件返回 `{ok:false,error}` / 原生库不在（普通浏览器、Windows/Linux 没打包对应
  * .dylib）/ 宿主没这条命令，一律 reject——这正是「原生不可用、该回落」的信号，别吞。
  */
-export async function invokeNative(method, payload = {}, uuid = 'otools-video') {
+export async function invokeNative(method, payload = {}, uuid = 'otools-puter-video') {
   let res;
   const w = nativeWrapper();
   if (w) {

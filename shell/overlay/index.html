@@ -31,7 +31,7 @@
     // 语言与后续的实时切换由 shell/src/otools/i18n.js 接管。
     (() => {
       const THEME_KEY = 'video-studio:theme';
-      const FOLLOWED_KEY = 'otools-video.theme-followed';
+      const FOLLOWED_KEY = 'otools-puter-video.theme-followed';
       const read = (key) => { try { return localStorage.getItem(key); } catch { return null; } };
       const write = (key, value) => { try { localStorage.setItem(key, value); } catch { /* 忽略 */ } };
 

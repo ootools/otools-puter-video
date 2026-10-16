@@ -1,4 +1,4 @@
-//! otools-video 原生插件：把浏览器编不了的 H.264 交给**宿主**上 Apple 硬件编码器。
+//! otools-puter-video 原生插件：把浏览器编不了的 H.264 交给**宿主**上 Apple 硬件编码器。
 //! ------------------------------------------------------------------
 //! 背景：WKWebView 里 WebCodecs 的 H.264 走 GPU 进程，在部分环境（用户实测 1080p）
 //! 编码到中途会静默挂死；`isConfigSupported()` 还说支持。VP9（软件 libvpx）能跑但慢。
@@ -6,7 +6,7 @@
 //!
 //! 本 crate 是宿主加载的 cdylib，通过 `otools_plugin_invoke` / `otools_plugin_free`
 //! 与宿主对话（见 otools 宿主 native_plugins::transport）。为了不依赖宿主仓库的
-//! `ot-plugin-ffi`（otools-video 是独立仓库），下面把 panic 安全护栏就地内联一份
+//! `ot-plugin-ffi`（otools-puter-video 是独立仓库），下面把 panic 安全护栏就地内联一份
 //! （逻辑与 ot-plugin-ffi 相同：panic 绝不能跨 DLL 边界 unwind，否则整个宿主 abort）。
 //!
 //! 编码实现走 **ffmpeg shell-out**（-c:v h264_videotoolbox）——与 gif 插件依赖 ffmpeg
@@ -411,7 +411,7 @@ fn dispatch(method: &str, payload: Value) -> Value {
             Err(error) => respond_err(format!("encode_h264 参数错误: {error}")),
         },
         // 宿主热更新前的停机握手：本插件无常驻后台线程，随时可替换。
-        "__otools_shutdown__" => respond_ok(json!("otools-video 无后台任务")),
+        "__otools_shutdown__" => respond_ok(json!("otools-puter-video 无后台任务")),
         _ => respond_err(format!("Unknown method: {method}")),
     }
 }

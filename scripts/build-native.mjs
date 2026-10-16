@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const nativeDir = path.join(root, 'native');
-const CRATE_DYLIB = 'libotools_video_native.dylib';
+const CRATE_DYLIB = 'libotools_puter_video_native.dylib';
 
 function main() {
   if (process.platform !== 'darwin') {

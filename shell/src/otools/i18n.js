@@ -31,7 +31,7 @@
 import zhCN, { patterns as zhCNPatterns } from './i18n.zh-CN.js';
 
 /** 用户选择的语言；'auto' = 跟随宿主。 */
-const PREF_KEY = 'otools-video.locale';
+const PREF_KEY = 'otools-puter-video.locale';
 
 /** 上游界面的语言，也是所有词典的键的语言，缺词时的回退目标。 */
 export const SOURCE_LOCALE = 'en-US';
@@ -246,7 +246,7 @@ function notify(previous) {
     try {
       fn(current, previous);
     } catch (err) {
-      console.error('[otools-video] i18n listener failed', err);
+      console.error('[otools-puter-video] i18n listener failed', err);
     }
   }
 }

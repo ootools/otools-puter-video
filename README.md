@@ -1,4 +1,4 @@
-# otools-video
+# otools-puter-video
 
 **Video Studio**（[HeyPuter/everything · src/video-studio](https://github.com/HeyPuter/everything/tree/main/src/video-studio)）的 **OTools 插件版**。
 
@@ -23,7 +23,7 @@
 ## 目录
 
 ```
-otools-video/
+otools-puter-video/
 ├── upstream/                    # HeyPuter/everything 的 src/video-studio 快照（原样，勿改）
 ├── shell/                       # 移植层（本仓库唯一需要维护的代码）
 │   ├── overlay/                 #   整文件替换，按同路径盖到构建树上
@@ -45,7 +45,7 @@ otools-video/
 │   ├── drop.mjs                 #   从构建树里删掉的上游文件（评审、云、上游开发夹具）
 │   └── tests/                   #   移植层自己的测试（i18n、原生编码器、编码探测…）
 ├── native/                      #   原生插件（Rust cdylib）：ffmpeg shell-out 硬件 H.264
-│   ├── Cargo.toml               #     crate-type = cdylib；产出 libotools_video_native.dylib
+│   ├── Cargo.toml               #     crate-type = cdylib；产出 libotools_puter_video_native.dylib
 │   └── src/lib.rs               #     探活 ffmpeg / 组命令 / 跑编码 / 一键安装 ffmpeg
 ├── lib/                         #   原生库产物（macOS.dylib，构建生成，.gitignore）
 ├── scripts/
@@ -201,7 +201,7 @@ document.dispatchEvent(new CustomEvent('otools-locale-changed', { detail: { loca
 
 | 来源 | 说明 |
 | --- | --- |
-| 用户在本插件里选的 | 存在 `otools-video.locale`。菜单：**顶栏 → Theme 旁边 → Language**，以及 **偏好设置 → 外观 → Language** |
+| 用户在本插件里选的 | 存在 `otools-puter-video.locale`。菜单：**顶栏 → Theme 旁边 → Language**，以及 **偏好设置 → 外观 → Language** |
 | 宿主推的 | 上面那套注入。默认行为就是跟随宿主 |
 | 浏览器语言 | 宿主没说话时（例如把 `dist/` 拖进普通浏览器）用 `navigator.language` |
 
@@ -259,7 +259,7 @@ node scripts/i18n-report.mjs --file src/ui/home.js
 上游自己有主题（`video-studio:theme`，值 `dark` / `light` / `system`，界面里也有 Theme 菜单），
 和宿主的主题不能打架，规则是「**我们跟随，直到用户自己选**」：
 
-- 跟随宿主时把值写进 `video-studio:theme`，同时把写过的值记在 `otools-video.theme-followed`；
+- 跟随宿主时把值写进 `video-studio:theme`，同时把写过的值记在 `otools-puter-video.theme-followed`；
 - 下次两者不一致 → 是用户在 Theme 菜单里自己选的 → 从此不再跟随；
 - 用户选回跟宿主一样的值时，跟随自动重新生效。
 
@@ -277,7 +277,7 @@ node scripts/sync-upstream.mjs  # 首次：拉上游快照（之后跟进上游�
 node scripts/build.mjs          # 合成 .build/ → vite build → dist/
 
 node scripts/test.mjs           # 可选但强烈建议：跑上游的测试套件（跑在移植后的代码上）
-node scripts/pack-plugin.mjs    # 打包 dist-pack/otools-video-<version>.oplg
+node scripts/pack-plugin.mjs    # 打包 dist-pack/otools-puter-video-<version>.oplg
 node scripts/verify-plugin.mjs  # 打包后自检
 ```
 
@@ -288,7 +288,7 @@ node scripts/verify-plugin.mjs  # 打包后自检
 
 ```powershell
 node scripts/build.mjs
-pwsh -File scripts/deploy-to-otools.ps1     # 同步到 <otools>\plugins\otools-video
+pwsh -File scripts/deploy-to-otools.ps1     # 同步到 <otools>\plugins\otools-puter-video
 ```
 
 然后重载/重启 OTools，应用列表里会出现「视频剪辑」。
@@ -312,7 +312,7 @@ window.otools = {
 ## 打包本地安装包（.oplg）
 
 ```bash
-node scripts/pack-plugin.mjs      # 产物在 dist-pack/：otools-video-<version>.oplg
+node scripts/pack-plugin.mjs      # 产物在 dist-pack/：otools-puter-video-<version>.oplg
 node scripts/verify-plugin.mjs    # 打包后自检
 ```
 

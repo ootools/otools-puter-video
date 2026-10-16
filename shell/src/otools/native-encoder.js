@@ -120,7 +120,7 @@ export async function nativeH264Available() {
 async function makeScratchDir(label) {
   const base = knownPath('cache') || knownPath('appData') || knownPath('home');
   if (!base) throw new Error('找不到可写的临时目录');
-  const dir = await joinPath(base, 'otools-video', 'encode', `${label}-${Date.now()}`);
+  const dir = await joinPath(base, 'otools-puter-video', 'encode', `${label}-${Date.now()}`);
   await createDir(dir);
   return dir;
 }

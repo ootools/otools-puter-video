@@ -9,7 +9,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $pluginRoot = Split-Path -Parent $PSScriptRoot
-$target = Join-Path $OtoolsRoot "plugins\otools-video"
+$target = Join-Path $OtoolsRoot "plugins\otools-puter-video"
 
 if (-not (Test-Path (Join-Path $OtoolsRoot "vendor\otools-plugin-sdk\src\index.ts"))) {
   Write-Error "未找到 otools 仓库：$OtoolsRoot（可用 -OtoolsRoot 指定其它路径）"

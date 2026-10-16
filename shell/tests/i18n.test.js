@@ -9,7 +9,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
-const PREF_KEY = 'otools-video.locale';
+const PREF_KEY = 'otools-puter-video.locale';
 
 /** 拿一份全新的 i18n 模块。 */
 async function freshI18n() {

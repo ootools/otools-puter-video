@@ -144,7 +144,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --target "$COMMIT_SHA" --title "$RELEASE_TAG" --notes "otools-video v${RELEASE_VERSION}"
+            gh release create "$RELEASE_TAG" --target "$COMMIT_SHA" --title "$RELEASE_TAG" --notes "otools-puter-video v${RELEASE_VERSION}"
           fi
           gh release upload "$RELEASE_TAG" release-assets/*.oplg release-assets/logo.svg release-assets/plugin.json release-assets/SHA256SUMS --clobber
       # OIDC 获取和使用在同一进程完成，秘密不经过 job outputs 或 artifact。
