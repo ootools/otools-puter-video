@@ -74,6 +74,25 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
         run: node scripts/pack-plugin.mjs --out dist-pack --version "$VERSION"
+      # 分平台包（新模式）：lib/ 里存在哪个平台的标准库就为哪个平台出包，
+      # 没有平台库（纯前端发布）时自然全部跳过，产物与历史行为一致。
+      - name: 打包分平台插件包（有平台库时）
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          for platform in windows macos linux; do
+            case "$platform" in
+              windows) lib=Windows.dll ;;
+              macos) lib=macOS.dylib ;;
+              linux) lib=Linux.so ;;
+            esac
+            if [ -f "lib/$lib" ]; then
+              node scripts/pack-plugin.mjs --out dist-pack --version "$VERSION" --platform "$platform"
+            else
+              echo "lib/$lib 不存在，跳过 $platform 平台包"
+            fi
+          done
       - name: 独立验证插件包
         run: node scripts/verify-plugin.mjs dist-pack
       - uses: actions/upload-artifact@v4

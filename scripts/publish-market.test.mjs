@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { credential, marketPayload, publishMarket, releaseMeta, productionManifest, releasePlan, validateAuthConfig } from './publish-market.mjs';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { credential, marketPayload, platformPackagePlatforms, publishMarket, releaseMeta, productionManifest, releasePlan, validateAuthConfig } from './publish-market.mjs';
 const response = (data, ok = true) => ({ ok, status: ok ? 200 : 403, json: async () => data });
 test('OIDC extracts GitHub value and xycloud data.access_token within one job', async () => {
   const calls=[];
@@ -67,4 +70,24 @@ test('invalid packid, entry and version are rejected before packaging',()=>{
   assert.throws(()=>releaseMeta({packid:'../escape',version:'1.0.0'}));
   assert.throws(()=>productionManifest({packid:'a',version:'1.0.0',entry:'../outside'}));
   assert.throws(()=>productionManifest({packid:'a',version:'1.0.0'}));
+});
+
+test('market payload reports platform packages and packageMode only when provided',()=>{
+  const manifest={packid:'plugin-a',uuid:'plugin-a',version:'1.0.0',displayName:'A',entry:'dist/index.html'};
+  const base='https://github.com/owner/repo/releases/download/v1.0.0';
+  const merged=marketPayload(manifest,'owner/repo','v1.0.0','1.0.0');
+  assert.equal(merged.packageMode,undefined);
+  assert.equal(merged.packageUrlMacos,undefined);
+  const split=marketPayload(manifest,'owner/repo','v1.0.0','1.0.0',['windows','macos','linux']);
+  assert.equal(split.packageMode,1);
+  assert.equal(split.packageUrlWindows,`${base}/plugin-a-1.0.0-windows.oplg`);
+  assert.equal(split.packageUrlMacos,`${base}/plugin-a-1.0.0-macos.oplg`);
+  assert.equal(split.packageUrlLinux,`${base}/plugin-a-1.0.0-linux.oplg`);
+});
+test('platform packages are detected from files actually present in the release dir',t=>{
+  const assets=fs.mkdtempSync(path.join(os.tmpdir(),'otools-video-market-'));
+  t.after(()=>fs.rmSync(assets,{recursive:true,force:true}));
+  fs.writeFileSync(path.join(assets,'plugin-a-1.0.0.oplg'),'x');
+  fs.writeFileSync(path.join(assets,'plugin-a-1.0.0-macos.oplg'),'x');
+  assert.deepEqual(platformPackagePlatforms(assets,'plugin-a','1.0.0'),['macos']);
 });

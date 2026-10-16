@@ -91,11 +91,16 @@ function main() {
   if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?$/.test(version || '')) fail(`version 非法：${version}`);
   ok(`plugin.json 合法：${packid}@${version}`);
 
-  // 摘要清单必须刚好覆盖这三个文件
+  // 摘要清单必须刚好覆盖：合包 + 已产出的分平台包 + plugin.json + logo.svg
   const sumsPath = path.join(directory, 'SHA256SUMS');
   if (!fs.existsSync(sumsPath)) fail('缺少 SHA256SUMS');
   const filename = `${packid}-${version}.oplg`;
-  const expected = new Set([filename, 'plugin.json', 'logo.svg']);
+  // 分平台包（<packid>-<version>-<platform>.oplg）：在目录里实际存在的才算数
+  const platformPacks = ['windows', 'macos', 'linux']
+    .map((platform) => `${packid}-${version}-${platform}.oplg`)
+    .filter((name) => fs.existsSync(path.join(directory, name)));
+  const packageNames = [filename, ...platformPacks];
+  const expected = new Set([...packageNames, 'plugin.json', 'logo.svg']);
   const checksums = new Map();
   for (const line of fs.readFileSync(sumsPath, 'utf8').split('\n').filter(Boolean)) {
     const [digest, name] = line.split('  ');
@@ -107,49 +112,67 @@ function main() {
     const actual = createHash('sha256').update(fs.readFileSync(path.join(directory, name))).digest('hex');
     if (actual !== digest) fail(`摘要不匹配：${name}`);
   }
-  ok(`SHA256SUMS 覆盖 ${checksums.size} 个文件且全部匹配`);
+  const presentOplg = fs.readdirSync(directory).filter((name) => name.endsWith('.oplg'));
+  if (presentOplg.length !== packageNames.length) fail(`发布目录混入了意外的 .oplg：${presentOplg.join(', ')}`);
+  ok(`SHA256SUMS 覆盖 ${checksums.size} 个文件且全部匹配（${packageNames.length} 个包）`);
 
   // 正式包不能启用开发模式
   if (manifest.devUrl) fail('正式包不能启用开发模式（devUrl）');
   if (manifest.quickDev) fail('正式包不能启用开发模式（quickDev）');
   ok('已去除 devUrl / quickDev');
 
-  // ZIP 结构与 CRC
+  // 每个包（合包与分平台包）逐个做 ZIP 结构与内容校验
+  for (const packageName of packageNames) {
+    verifyPackage(packageName, manifest, platformPacks.includes(packageName));
+  }
+  console.log(`\n${packageNames.length} 个插件包校验通过（${packageNames.join('、')}）。`);
+}
+
+function verifyPackage(filename, manifest, isPlatformPack) {
+  const { packid, version } = manifest;
   const oplg = path.join(directory, filename);
   const entries = readZip(fs.readFileSync(oplg));
   const names = entries.map((e) => e.name);
-  if (names.length !== new Set(names).size) fail('ZIP 含重复文件');
+  if (names.length !== new Set(names).size) fail(`[${filename}] ZIP 含重复文件`);
   for (const name of names) {
-    if (name.includes('\\')) fail(`ZIP 路径含反斜杠：${name}`);
+    if (name.includes('\\')) fail(`[${filename}] ZIP 路径含反斜杠：${name}`);
     const pure = path.posix.normalize(name);
-    if (pure.startsWith('/') || pure.split('/').includes('..')) fail(`ZIP 路径非法：${name}`);
+    if (pure.startsWith('/') || pure.split('/').includes('..')) fail(`[${filename}] ZIP 路径非法：${name}`);
   }
   for (const entry of entries) {
     const actual = crc32(entry.data);
-    if (actual !== entry.crc) fail(`CRC 校验失败：${entry.name}`);
-    if (entry.data.length !== entry.uncompressedSize) fail(`解压后大小不符：${entry.name}`);
+    if (actual !== entry.crc) fail(`[${filename}] CRC 校验失败：${entry.name}`);
+    if (entry.data.length !== entry.uncompressedSize) fail(`[${filename}] 解压后大小不符：${entry.name}`);
   }
-  ok(`ZIP ${entries.length} 个条目，CRC 全部通过`);
+  ok(`[${filename}] ZIP ${entries.length} 个条目，CRC 全部通过`);
 
-  if (!names.includes(String(manifest.entry))) fail(`ZIP 缺少入口：${manifest.entry}`);
-  if (!names.includes('logo.svg')) fail('ZIP 缺少 logo.svg');
-  ok(`入口 ${manifest.entry} 与 logo.svg 都在包内`);
+  if (!names.includes(String(manifest.entry))) fail(`[${filename}] ZIP 缺少入口：${manifest.entry}`);
+  if (!names.includes('logo.svg')) fail(`[${filename}] ZIP 缺少 logo.svg`);
+  ok(`[${filename}] 入口 ${manifest.entry} 与 logo.svg 都在包内`);
 
   // 入口 HTML 的两条硬要求
   const entryData = entries.find((e) => e.name === manifest.entry).data.toString('utf8');
-  if (!entryData.includes('./assets/')) fail('入口 HTML 里没有相对路径的 assets/ 引用（宿主用 otools-plugin:// 提供插件，必须是相对路径）');
-  ok('入口 HTML 用的是相对路径资源');
-  if (/<script[^>]+src=["'][^"']*puter\.com/i.test(entryData)) fail('入口 HTML 里还有指向 puter.com 的 <script src> —— 插件不该加载 Puter SDK');
-  ok('入口 HTML 没有加载 Puter SDK');
+  if (!entryData.includes('./assets/')) fail(`[${filename}] 入口 HTML 里没有相对路径的 assets/ 引用（宿主用 otools-plugin:// 提供插件，必须是相对路径）`);
+  ok(`[${filename}] 入口 HTML 用的是相对路径资源`);
+  if (/<script[^>]+src=["'][^"']*puter\.com/i.test(entryData)) fail(`[${filename}] 入口 HTML 里还有指向 puter.com 的 <script src> —— 插件不该加载 Puter SDK`);
+  ok(`[${filename}] 入口 HTML 没有加载 Puter SDK`);
 
   // 前端产物：至少要有 JS；本插件没有 native，所以不要求 .wasm
   const js = entries.filter((e) => e.name.startsWith('dist/') && e.name.endsWith('.js'));
-  if (!js.length) fail('包内没有 dist/**/*.js');
+  if (!js.length) fail(`[${filename}] 包内没有 dist/**/*.js`);
   const wasm = entries.filter((e) => e.name.endsWith('.wasm'));
+  const libFiles = entries.filter((e) => e.name.startsWith('lib/'));
+  if (isPlatformPack) {
+    // 分平台包只允许带本平台的标准库（macOS.dylib / Windows.dll / Linux.so）
+    const canonical = { macos: 'macOS.dylib', windows: 'Windows.dll', linux: 'Linux.so' };
+    const platform = Object.keys(canonical).find((key) => filename.endsWith(`-${key}.oplg`));
+    const foreign = libFiles.filter((e) => e.name !== `lib/${canonical[platform]}`);
+    if (foreign.length) fail(`[${filename}] 分平台包混入了其他平台的库：${foreign.map((e) => e.name).join(', ')}`);
+    if (!libFiles.some((e) => e.name === `lib/${canonical[platform]}`)) fail(`[${filename}] 分平台包缺少本平台库：lib/${canonical[platform]}`);
+    ok(`[${filename}] 分平台包只带 lib/${canonical[platform]}`);
+  }
   const totalBytes = entries.reduce((sum, e) => sum + e.data.length, 0);
-  ok(`前端产物：${js.length} 个 js${wasm.length ? `、${wasm.length} 个 wasm` : ''}，整包 ${(totalBytes / 1048576).toFixed(2)} MB`);
-
-  console.log(`\n${filename} 校验通过（${entries.length} 个条目）。`);
+  ok(`[${filename}] 前端产物：${js.length} 个 js${wasm.length ? `、${wasm.length} 个 wasm` : ''}${libFiles.length ? `、${libFiles.length} 个 lib 文件` : ''}，整包 ${(totalBytes / 1048576).toFixed(2)} MB`);
 }
 
 try {

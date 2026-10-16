@@ -1,5 +1,6 @@
 /** 独立插件发布：显式选择认证方式，秘密仅在当前进程使用，不写入 artifact/job outputs。 */
 import fs from 'node:fs';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 function httpsUrl(value) {
@@ -81,7 +82,15 @@ export function validateAuthConfig(mode,env) {
   } else throw new Error('未知发布认证方式');
   if (env.OTOOLS_MARKET_API) httpsUrl(env.OTOOLS_MARKET_API);
 }
-export function marketPayload(manifest,repo,tag,version) {
+/** 已产出分平台包的平台列表（按发布目录里实际存在的 -<platform>.oplg 判定） */
+export function platformPackagePlatforms(assetsDir,packid,version) {
+  const platforms=[];
+  for (const platform of ['windows','macos','linux']) {
+    if (fs.existsSync(path.join(assetsDir,`${packid}-${version}-${platform}.oplg`))) platforms.push(platform);
+  }
+  return platforms;
+}
+export function marketPayload(manifest,repo,tag,version,platforms=[]) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo || '')) throw new Error('GitHub 仓库名称无效');
   const base=`https://github.com/${repo}/releases/download/${encodeURIComponent(tag)}`;
   // logo 不能用 Release 资产下载链：GitHub 会 302 到
@@ -90,7 +99,13 @@ export function marketPayload(manifest,repo,tag,version) {
   // 改用 raw.githubusercontent.com 上同一 tag 的仓库文件：返回 image/svg+xml，
   // 可直接渲染，且随 tag 固定不会漂移。
   const logo=`https://raw.githubusercontent.com/${repo}/${encodeURIComponent(tag)}/logo.svg`;
-  return {...productionManifest(manifest,version),packageUrl:`${base}/${manifest.packid}-${version}.oplg`,logo};
+  const payload={...productionManifest(manifest,version),packageUrl:`${base}/${manifest.packid}-${version}.oplg`,logo};
+  // 分平台包与合包同 Release。上报了平台包就置 packageMode=1（客户端优先平台包，失败回退合包）
+  for (const platform of platforms) {
+    payload[`packageUrl${platform[0].toUpperCase()}${platform.slice(1)}`]=`${base}/${manifest.packid}-${version}-${platform}.oplg`;
+  }
+  if (platforms.length>0) payload.packageMode=1;
+  return payload;
 }
 export async function publishMarket(url,access,payload,fetcher=fetch) {
   const result=await jsonRequest(fetcher,url,{method:'POST',headers:{Authorization:`Bearer ${token(access)}`,'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -112,9 +127,12 @@ async function main() {
   }
   validateAuthConfig(env.AUTH_MODE,env);
   const access=await credential(env.AUTH_MODE,env);
+  // 平台包检测以发布目录里实际存在的文件为准（PLUGIN_MANIFEST 就在发布目录里）
+  const assetsDir=path.dirname(env.PLUGIN_MANIFEST || 'plugin.json');
+  const platforms=platformPackagePlatforms(assetsDir,manifest.packid,env.RELEASE_VERSION);
   await publishMarket(env.OTOOLS_MARKET_API || 'https://otools-api.lingyun.net/api/v1/otools/plugin/publish',access,
-    marketPayload(manifest,env.GITHUB_REPOSITORY,env.RELEASE_TAG,env.RELEASE_VERSION));
-  console.log('插件市场已确认发布成功');
+    marketPayload(manifest,env.GITHUB_REPOSITORY,env.RELEASE_TAG,env.RELEASE_VERSION,platforms));
+  console.log(`插件市场已确认发布成功（分平台包：${platforms.length ? platforms.join(', ') : '无'}）`);
 }
 if (process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {
   main().catch(error=>{console.error(error.message);process.exitCode=1;});
