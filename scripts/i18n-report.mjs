@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const upstreamSrc = path.join(repoRoot, 'upstream', 'src');
 const catalogPath = path.join(repoRoot, 'shell', 'src', 'otools', 'i18n.zh-CN.js');
+const commonPath = path.join(repoRoot, 'shell', 'src', 'otools', 'i18n.common.zh-CN.js');
 
 const has = (name) => process.argv.includes(`--${name}`);
 const arg = (name) => {
@@ -67,28 +68,34 @@ const NOT_UI = [
  */
 const CONTEXT_RULES = [
   // 属性表里的展示字段：{ label: '…' }、title: '…'、'aria-label': '…'、data-tip: '…'
-  { re: /(?:^|[\s{,(])(?:label|title|heading|hint|note|description|placeholder|text|okLabel|cancelLabel|confirm|cancel|ok|tip|unit|why|reason|message|empty|sub|body|summary)\s*:\s*(['"])((?:[^'"\\\n]|\\.){2,140})\1/g, group: 2 },
-  { re: /['"](?:aria-label|data-tip|aria-labelledby|aria-describedby)['"]\s*:\s*(['"])((?:[^'"\\\n]|\\.){2,140})\1/g, group: 2 },
+  { re: /(?:^|[\s{,(])(?:label|title|heading|hint|note|description|placeholder|text|okLabel|cancelLabel|confirm|cancel|ok|tip|unit|why|reason|message|empty|sub|body|summary|about|help|detail|desc|name)\s*:\s*(['"])((?:[^'"\\\n]|\\.){2,400})\1/g, group: 2 },
+  { re: /['"](?:aria-label|data-tip|aria-labelledby|aria-describedby)['"]\s*:\s*(['"])((?:[^'"\\\n]|\\.){2,400})\1/g, group: 2 },
   // h('div.cls', {…}, '文本') / h('div.cls', '文本')
-  { re: /\bh\(\s*(['"])[^'"]*\1\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,140})\2/g, group: 3 },
-  { re: /\bh\(\s*(['"])[^'"]*\1\s*,\s*\{[^{}]*\}\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,140})\2/g, group: 3 },
+  // h('button.btn', { … }, icon('x', 14), '文本')：图标参数夹在对象与文本之间
+  { re: /\bh\(\s*(['"])[^'"]*\1\s*,\s*\{[^{}]*\}\s*,\s*(?:[^,()]|\([^()]*\))*,\s*(['"])((?:[^'"\\\n]|\\.){3,400})\2/g, group: 3 },
+  { re: /\bh\(\s*(['"])[^'"]*\1\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,400})\2/g, group: 3 },
+  { re: /\bh\(\s*(['"])[^'"]*\1\s*,\s*\{[^{}]*\}\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,400})\2/g, group: 3 },
   // emptyState('icon', '标题', '正文')
-  { re: /\bemptyState\(\s*(['"])[^'"]*\1\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,140})\2/g, group: 3 },
+  { re: /\bemptyState\(\s*(['"])[^'"]*\1\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,400})\2/g, group: 3 },
   // .textContent = '文本'
-  { re: /\.textContent\s*=\s*(['"])((?:[^'"\\\n]|\\.){3,140})\1/g, group: 2 },
+  { re: /\.textContent\s*=\s*(['"])((?:[^'"\\\n]|\\.){3,400})\1/g, group: 2 },
   // 会直接显示给用户的调用：announce / toast / note / done / progress
-  { re: /\b(?:announce|toast|note|done|progress|promptDialog|confirmDialog)\(\s*(['"])((?:[^'"\\\n]|\\.){3,140})\1/g, group: 2 },
+  { re: /\b(?:announce|toast|note|done|progress|promptDialog|confirmDialog)\(\s*(['"])((?:[^'"\\\n]|\\.){3,400})\1/g, group: 2 },
   // fail('kind', '文案')：第二个参数才是文案
-  { re: /\bfail\(\s*(['"])[^'"]*\1\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,140})\2/g, group: 3 },
+  { re: /\bfail\(\s*(['"])[^'"]*\1\s*,\s*(['"])((?:[^'"\\\n]|\\.){3,400})\2/g, group: 3 },
   // 进度条文本：p.set(0.5, 'Matching …') / progress('Packing …', …)
-  { re: /\b[a-zA-Z_$][\w$]*\.set\([^,()]*,\s*(['"])((?:[^'"\\\n]|\\.){3,140})\1/g, group: 2 },
+  { re: /\b[a-zA-Z_$][\w$]*\.set\([^,()]*,\s*(['"])((?:[^'"\\\n]|\\.){3,400})\1/g, group: 2 },
   // 历史 / 编辑动作的标签：store.update('Add track', …)、view.edit('Reset color', …)
   // 这些会出现在历史面板条目与撤销/重做的悬停提示里。
-  { re: /\b(?:update|edit)\(\s*(['"])((?:[^'"\\\n]|\\.){2,140})\1/g, group: 2 },
-  { re: /\.undoStack\.push\(\s*\{[^}]*\blabel\s*:\s*(['"])((?:[^'"\\\n]|\\.){2,140})\1/g, group: 2 },
+  { re: /\b(?:update|edit)\(\s*(['"])((?:[^'"\\\n]|\\.){2,400})\1/g, group: 2 },
+  { re: /\.undoStack\.push\(\s*\{[^}]*\blabel\s*:\s*(['"])((?:[^'"\\\n]|\\.){2,400})\1/g, group: 2 },
   // 抛给用户的错误文案（上游把它们显示在错误页 / toast 里）
-  { re: /\bnew Error\(\s*(['"])((?:[^'"\\\n]|\\.){3,160})\1/g, group: 2 },
+  { re: /\bnew Error\(\s*(['"])((?:[^'"\\\n]|\\.){3,400})\1/g, group: 2 },
 ];
+
+/** 源码扩展名：上游有的用 .js、有的用 .ts/.tsx（photo-studio、3d 全是 .ts），
+ *  漏掉任一扩展名都会让那一整类应用的界面文案永远不在报告里。 */
+const SRC_EXTS = new Set(['.js', '.mjs', '.ts', '.tsx', '.jsx', '.vue', '.svelte']);
 
 function walk(dir, out = []) {
   if (!fs.existsSync(dir)) return out;
@@ -96,7 +103,7 @@ function walk(dir, out = []) {
     const full = path.join(dir, name);
     const stat = fs.statSync(full);
     if (stat.isDirectory()) walk(full, out);
-    else if (name.endsWith('.js')) out.push(full);
+    else if (SRC_EXTS.has(path.extname(name).toLowerCase())) out.push(full);
   }
   return out;
 }
@@ -110,8 +117,11 @@ function extractFrom(source) {
     while ((m = re.exec(source))) {
       const raw = m[rule.group];
       if (!raw) continue;
-      const value = raw.replace(/\\'/g, "'").replace(/\\"/g, '"').replace(/\\n/g, ' ');
-      if (value.length < 3 || value.length > 120) continue;
+      // 与 readCatalog 用**同一套**还原规则。历史上这里把 `\n` 换成空格，
+      // 而词典侧的键还原成了真换行，于是多行 tooltip（`启用\n说明`）永远比对
+      // 不上——明明有译文却被算成缺口，报告覆盖率因此系统性偏低。
+      const value = unescapeLiteral(raw);
+      if (value.length < 3 || value.length > 400) continue;
       if (!/[A-Za-z\u4e00-\u9fa5]/.test(value)) continue;
       if (NOT_UI.some((p) => p.test(value))) continue;
       // 带模板插值的动态文案不可能是词典键
@@ -138,12 +148,47 @@ function readCatalog() {
   const re = /^\s*(?:'((?:[^'\\\n]|\\.)+)'|"((?:[^"\\\n]|\\.)+)"|([A-Za-z_$][\w$]*))\s*:\s*(?:'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)")\s*,?\s*$/gm;
   let m;
   while ((m = re.exec(source))) {
-    const key = m[1] ?? m[2] ?? m[3];
+    const key = unescapeLiteral(m[1] ?? m[2] ?? m[3]);
     const value = m[4] ?? m[5] ?? '';
     if (entries.has(key)) duplicates.push(key);
     entries.set(key, value);
   }
   return { entries, duplicates };
+}
+
+/**
+ * 读通用词典（与其它插件共用的那一份）。
+ * 运行时项目词典是 `...common` 展开的，所以覆盖率要看合并后的全集——
+ * 否则报告永远显示 0%（通用词明明已经在生效）。
+ */
+function readCommon() {
+  if (!fs.existsSync(commonPath)) return new Map();
+  const source = fs.readFileSync(commonPath, 'utf8');
+  const entries = new Map();
+  const re = /^\s*(?:'((?:[^'\\\n]|\\.)+)'|"((?:[^"\\\n]|\\.)+)"|([A-Za-z_$][\w$]*))\s*:\s*(?:'((?:[^'\\\n]|\\.)*)'|"((?:[^"\\\n]|\\.)*)")\s*,?\s*$/gm;
+  let m;
+  while ((m = re.exec(source))) {
+    const key = unescapeLiteral(m[1] ?? m[2] ?? m[3]);
+    const value = m[4] ?? m[5] ?? '';
+    if (!entries.has(key)) entries.set(key, value);
+  }
+  return entries;
+}
+
+/**
+ * 还原 JS 字符串字面量的转义。
+ *
+ * 必须做这一步：词典里的键写成 `'...the notch\\'s depth...'`（撇号要转义），
+ * 而源码抽出来的原文是 `...the notch's depth...`（已还原）。不还原的话，
+ * 带撇号的词条会被当成「没翻译」——运行时其实是好的（JS 自己会还原），
+ * 只是报告数字偏低，还会污染「剩余缺口 == 刻意保留英文清单」这条自检。
+ */
+function unescapeLiteral(s) {
+  return String(s ?? '')
+    .replace(/\\'/g, "'")
+    .replace(/\\"/g, '"')
+    .replace(/\\n/g, String.fromCharCode(10))
+    .replace(/\\\\\\\\/g, '\\');
 }
 
 function main() {
@@ -162,6 +207,8 @@ function main() {
   }
 
   const { entries: catalog, duplicates } = readCatalog();
+  // 把通用词典并进来：运行时项目词典是 ...common 展开的，覆盖率统计要看合并后的全集。
+  for (const [k, v] of readCommon()) if (!catalog.has(k)) catalog.set(k, v);
 
   if (has('list') || has('missing')) {
     const rows = [...total].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
@@ -177,7 +224,7 @@ function main() {
   const coveredOccurrences = covered.reduce((sum, k) => sum + total.get(k), 0);
 
   console.log(`候选文案：${total.size} 条不同文案，共出现 ${occurrences} 次`);
-  console.log(`词典条目：${catalog.size} 条`);
+  console.log(`词典条目（含通用）：${catalog.size} 条`);
   console.log(`已覆盖：${covered.length}/${total.size}（${((covered.length / total.size) * 100).toFixed(1)}%），按出现次数算 ${((coveredOccurrences / occurrences) * 100).toFixed(1)}%`);
   console.log(`未覆盖：${missing.length} 条`);
 
