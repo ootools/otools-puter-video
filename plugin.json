@@ -32,5 +32,5 @@
   "screenshots": [],
   "summary": "Video Studio（HeyPuter/everything 的多轨视频剪辑器）的 OTools 插件版：时间线剪辑、字幕、特效、转场、调色、关键帧与硬件加速导出。工程与素材是本机目录里的普通文件，不走任何云账号。",
   "uuid": "otools-puter-video",
-  "version": "0.1.5"
+  "version": "0.1.6"
 }
