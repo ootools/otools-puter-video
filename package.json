@@ -1,6 +1,6 @@
 {
   "name": "otools-puter-video",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "description": "Video Studio (HeyPuter/everything) as an OTools plugin: the same multi-track editor, with projects and media stored as plain files on this computer instead of in a Puter cloud account.",
