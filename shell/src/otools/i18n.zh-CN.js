@@ -24,7 +24,7 @@
  */
 
 export default {
-    ' — pick another folder in OTools and try again.': '——请在 OTools 里换一个目录后重试。',
+  ' — pick another folder in OTools and try again.': '——请在 OTools 里换一个目录后重试。',
   '10 ready-made projects to make your own': '10 个现成模板，改成你自己的',
   'A bold title over a glowing backdrop with a slow push in.': '发光背景上的粗体标题，缓慢推近。',
   'A brief flash, a zoom punch or motion blur where the speed turns, as keys you can edit.': '在速度转折处加一次闪光、推近冲击或运动模糊，并且是可编辑的关键帧。',
