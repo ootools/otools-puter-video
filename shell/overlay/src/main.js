@@ -38,6 +38,8 @@ import { otoolsBackend, resolveRoot, ensureRoot } from './otools/backend.js';
 import { installI18n, t } from './otools/i18n.js';
 import { installDomTranslation } from './otools/dom-i18n.js';
 import { installThemeFollow, primeThemeFromHost } from './otools/theme-sync.js';
+import { installMcpBridge } from './otools/mcp.js';
+import { setVideoMcpContext, videoMcpTools } from './otools/mcp-tools.js';
 
 // 语言与主题都要在第一次渲染之前装好：
 //   - installI18n 解析出当前语言（宿主 → 用户覆盖 → 浏览器），并开始监听宿主切换；
@@ -47,6 +49,13 @@ installI18n();
 installDomTranslation();
 primeThemeFromHost();
 installThemeFollow();
+
+// MCP 桥挂在移植层就绪之后、首屏渲染之前：宿主读 `window.__otoolsMcp` 时
+// 工具会用到 `backend.js` 的工程目录解析，而这一步不依赖界面是否已经画完。
+// 挂载本身没有副作用（只赋值，不触发工具调用）。
+// 领域工具（工程列表/结构/新建/改名/打开）在 `otools/mcp-tools.js`，它们的活
+// 句柄由 `startOtools()` / `startLocal()` 在工程库就绪后交进来。
+installMcpBridge({ extraTools: videoMcpTools() });
 
 const root = document.getElementById('app');
 applyTheme();
@@ -167,6 +176,13 @@ async function startOtools() {
     picture: null,
   };
   host.diag({ root: rootPath, backend: 'otools' });
+  setVideoMcpContext({
+    library,
+    libraryRoot: rootPath,
+    openProject,
+    refreshHome: refreshHomeIfVisible,
+    editorContext: currentEditorContext,
+  });
   route();
 }
 
@@ -174,7 +190,25 @@ async function startOtools() {
 function startLocal(env) {
   library = new Library(opfsAvailable() ? opfsBackend() : memoryBackend());
   account = { user: null, env, picture: null };
+  // 浏览器兜底没有「工程目录」，依赖磁盘的工具（导入/导出）会给出明确报错。
+  setVideoMcpContext({
+    library,
+    libraryRoot: '',
+    openProject,
+    refreshHome: refreshHomeIfVisible,
+    editorContext: currentEditorContext,
+  });
   route();
+}
+
+/** 首页在的时候就刷一下列表（MCP 建/改名工程后，界面要跟着变）；在编辑器里则跳过。 */
+function refreshHomeIfVisible() {
+  return view && typeof view.refreshLists === 'function' ? view.refreshLists() : undefined;
+}
+
+/** 当前编辑器的 ctx（在首页时是 null）：MCP 的时间线工具靠它拿 store/actions。 */
+function currentEditorContext() {
+  return view && view.ctx ? view.ctx : null;
 }
 
 function route() {

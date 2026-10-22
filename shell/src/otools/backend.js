@@ -24,7 +24,7 @@ import { t } from './i18n.js';
 /** 工程目录记在 localStorage：跨插件重启仍然记得。 */
 const ROOT_KEY = 'otools-puter-video.root';
 /** 目录里放一个标记文件，用户改到别的目录时能看出这是本插件的工程目录。 */
-const MARKER = 'video-studio.json';
+export const MARKER = 'video-studio.json';
 /** 默认目录名（宿主路径 + 这一层）。 */
 const FOLDER_NAME = 'Video Studio';
 

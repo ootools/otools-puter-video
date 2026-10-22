@@ -32,5 +32,389 @@
   "screenshots": [],
   "summary": "Video Studio（HeyPuter/everything 的多轨视频剪辑器）的 OTools 插件版：时间线剪辑、字幕、特效、转场、调色、关键帧与硬件加速导出。工程与素材是本机目录里的普通文件，不走任何云账号。",
   "uuid": "otools-puter-video",
-  "version": "0.1.6"
+  "version": "0.2.0",
+  "mcp": {
+    "enabled": true,
+    "backend": "webview",
+    "namespace": "puter-video",
+    "expose": [
+      "list_library",
+      "read_file",
+      "write_file",
+      "library_path",
+      "list_projects",
+      "get_project",
+      "get_storage_usage",
+      "create_project",
+      "rename_project",
+      "open_project",
+      "get_editor_state",
+      "list_catalog",
+      "list_commands",
+      "run_command",
+      "set_playhead",
+      "add_clip",
+      "add_text",
+      "update_text_style",
+      "find_replace_text",
+      "apply_animation",
+      "set_keyframe",
+      "remove_keyframe",
+      "set_keyframe_ease",
+      "update_clip",
+      "remove_clip",
+      "split_clip",
+      "select_clips",
+      "duplicate_clips",
+      "freeze_frame",
+      "detach_audio",
+      "toggle_clip",
+      "group_clips",
+      "ungroup_clips",
+      "mirror_clip",
+      "apply_transition",
+      "apply_effect",
+      "apply_filter",
+      "update_track",
+      "set_project_settings",
+      "list_timelines",
+      "switch_timeline",
+      "add_timeline",
+      "duplicate_timeline",
+      "rename_timeline",
+      "delete_timeline",
+      "save_project",
+      "add_marker",
+      "remove_marker",
+      "clear_markers",
+      "set_range",
+      "clear_range",
+      "cut_range",
+      "add_sticker",
+      "add_caption",
+      "add_track",
+      "delete_track",
+      "move_track",
+      "rename_track",
+      "set_track_solo",
+      "add_adjustment",
+      "set_color_grade",
+      "insert_template",
+      "set_clip_attribute",
+      "set_speed_ramp",
+      "set_speed_curve",
+      "list_luts",
+      "apply_lut",
+      "auto_color",
+      "import_media",
+      "export_video",
+      "export_frame",
+      "get_job",
+      "list_jobs",
+      "list_sfx",
+      "add_sfx",
+      "list_music",
+      "add_music",
+      "set_audio_fx"
+    ],
+    "annotations": {
+      "list_library": {
+        "readOnly": true
+      },
+      "read_file": {
+        "readOnly": true
+      },
+      "write_file": {
+        "readOnly": false,
+        "destructive": true
+      },
+      "library_path": {
+        "readOnly": true
+      },
+      "list_projects": {
+        "readOnly": true
+      },
+      "get_project": {
+        "readOnly": true
+      },
+      "get_storage_usage": {
+        "readOnly": true
+      },
+      "create_project": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "rename_project": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "open_project": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "get_editor_state": {
+        "readOnly": true
+      },
+      "list_catalog": {
+        "readOnly": true
+      },
+      "list_commands": {
+        "readOnly": true
+      },
+      "run_command": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "set_playhead": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "add_clip": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "add_text": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "update_clip": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "remove_clip": {
+        "readOnly": false,
+        "destructive": true
+      },
+      "split_clip": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "select_clips": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "duplicate_clips": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "freeze_frame": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "detach_audio": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "toggle_clip": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "group_clips": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "ungroup_clips": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "mirror_clip": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "apply_transition": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "apply_effect": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "apply_filter": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "update_track": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "set_project_settings": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "save_project": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "import_media": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "export_video": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "export_frame": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "get_job": {
+        "readOnly": true
+      },
+      "list_jobs": {
+        "readOnly": true
+      },
+      "update_text_style": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "apply_animation": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "set_keyframe": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "remove_keyframe": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "list_sfx": {
+        "readOnly": true
+      },
+      "add_sfx": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "list_music": {
+        "readOnly": true
+      },
+      "add_music": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "set_audio_fx": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "add_marker": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "remove_marker": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "clear_markers": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "add_sticker": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "add_caption": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "add_track": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "delete_track": {
+        "readOnly": false,
+        "destructive": true
+      },
+      "move_track": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "rename_track": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "set_track_solo": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "add_adjustment": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "set_color_grade": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "insert_template": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "set_clip_attribute": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "set_keyframe_ease": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "set_speed_curve": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "set_speed_ramp": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "list_luts": {
+        "readOnly": true
+      },
+      "apply_lut": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "auto_color": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "set_range": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "clear_range": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "cut_range": {
+        "readOnly": false,
+        "destructive": true
+      },
+      "list_timelines": {
+        "readOnly": true
+      },
+      "switch_timeline": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "add_timeline": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "duplicate_timeline": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "rename_timeline": {
+        "readOnly": false,
+        "destructive": false
+      },
+      "delete_timeline": {
+        "readOnly": false,
+        "destructive": true
+      },
+      "find_replace_text": {
+        "readOnly": false,
+        "destructive": false
+      }
+    }
+  }
 }
