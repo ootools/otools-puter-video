@@ -157,7 +157,8 @@ function verifyPackage(filename, manifest, isPlatformPack) {
   if (/<script[^>]+src=["'][^"']*puter\.com/i.test(entryData)) fail(`[${filename}] 入口 HTML 里还有指向 puter.com 的 <script src> —— 插件不该加载 Puter SDK`);
   ok(`[${filename}] 入口 HTML 没有加载 Puter SDK`);
 
-  // 前端产物：至少要有 JS；本插件没有 native，所以不要求 .wasm
+  // 前端产物：至少要有 JS（wasm 是可选解密/推理资源，不强要求）。
+  // 原生库归平台包那一档校验（lib/<platform> 必须在），合包不强求。
   const js = entries.filter((e) => e.name.startsWith('dist/') && e.name.endsWith('.js'));
   if (!js.length) fail(`[${filename}] 包内没有 dist/**/*.js`);
   const wasm = entries.filter((e) => e.name.endsWith('.wasm'));

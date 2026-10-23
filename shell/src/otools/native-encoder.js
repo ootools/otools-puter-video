@@ -31,11 +31,25 @@ import { audibleClips } from '../engine/scene.js';
 let availableCache = null;
 /** 最近一次探测的结论原因，供导出报错时告诉用户「原生 H.264 为什么没走」。 */
 let lastReason = 'not-probed';
+/**
+ * 最近一次失败时**宿主返回的原始错误**。
+ *
+ * 背景：ffmpeg_probe 失败时 reason 只有一个笼统的 'invoke-failed'，真因（原生库是旧版本
+ * 返回 Unknown method / 宿主没加载 native / 权限拒绝）全被吞在 diag 里，用户和排查的人都
+ * 看不到。这里存一份原样文本，导出设置面板会在 reason 后面把它显示出来。
+ */
+let lastError = '';
 
 /** 仅测试用：清掉探测缓存。 */
 export function _resetNativeH264Availability() {
   availableCache = null;
   lastReason = 'not-probed';
+  lastError = '';
+}
+
+/** 最近一次失败时宿主给的原始错误信息（没有则返回 ''）。供 UI 显示与人工排查。 */
+export function nativeH264Error() {
+  return lastError;
 }
 
 /**
@@ -55,6 +69,7 @@ export async function installFfmpeg() {
 export async function reprobeNativeH264() {
   availableCache = null;
   lastReason = 'not-probed';
+  lastError = '';
   return nativeH264Available();
 }
 
@@ -98,7 +113,8 @@ export async function nativeH264Available() {
       probe = await invokeNative('ffmpeg_probe', {});
     } catch (err) {
       // 原生库缺失 / 走包装失败 / 宿主没这条命令 / 权限拒绝——记下来，别吞。
-      diag({ nativeH264: false, nativeWhy: 'invoke-failed', nativeErr: String(err?.message || err) });
+      lastError = String(err?.message || err);
+      diag({ nativeH264: false, nativeWhy: 'invoke-failed', nativeErr: lastError });
       return settle('invoke-failed');
     }
     diag({ ffmpegProbe: probe });
@@ -111,7 +127,8 @@ export async function nativeH264Available() {
     diag({ nativeH264: false, nativeWhy: 'ffmpeg-missing-or-no-videotoolbox', ffmpegProbe: probe });
     return settle('ffmpeg-missing-or-no-videotoolbox');
   } catch (err) {
-    diag({ nativeH264: false, nativeWhy: 'exception', nativeErr: String(err?.message || err) });
+    lastError = String(err?.message || err);
+    diag({ nativeH264: false, nativeWhy: 'exception', nativeErr: lastError });
     return settle('exception');
   }
 }

@@ -419,33 +419,22 @@ const canSaveLocally = () => hostReady();`,
     why: '文件头注释里的描述',
   },
 
-  /* ================================ 默认导出格式：VP9 / WebM ================================ */
-  // H.264 / HEVC 在本插件里走的是 WebCodecs 的**硬件**编码路径：某些 webview
-  // （macOS 上的 WKWebView 尤其常见）isConfigSupported() 说支持，真正开始编码却
-  // 静默挂起——不会抛错，进度永远停在 0%。VP9 是软件编码（WebKit 上是进程内的
-  // libvpx），在这些环境里能跑完，所以默认改成 VP9 / WebM；用户仍可以在导出
-  // 设置里手动选回 H.264 / MP4。
-  //
-  // 只有「默认值」改了，用户一旦自己选过就以他的选择为准：编码卡住时**不自动
-  // 换格式**（悄悄把选好的 MP4 变成 WebM 是不能接受的），而是明确报错并告诉他
-  // 该改哪一项。
-  {
-    file: 'src/engine/exporter.js',
-    find: "  codec: 'avc',\n  format: 'mp4',",
-    replace: "  codec: 'vp9',\n  format: 'webm',",
-    expect: 1,
-    why: '默认导出格式改成 VP9 / WebM：WebCodecs 硬件编码在部分 webview 里会静默挂起',
-  },
+  /* ============================ 默认导出格式：保持 H.264 / MP4 ============================ */
+  // 用户要求 H.264 必须支持，故保持上游默认的 H.264 / MP4（不在移植层改成 VP9）。
+  // 可靠性靠两条兜底：（1）导出时 H.264/MP4 且宿主可用（macOS + ffmpeg 带
+  // h264_videotoolbox）走原生硬件编码快路径（见「原生 H.264 快路径」段）；（2）导出
+  // 设置面板主动探测原生 H.264，缺失时给出一键安装 ffmpeg / 更新插件的协助（见
+  // 「原生 H.264 提示 + 一键安装 ffmpeg」段），而不是静默改成 VP9。用户手动选过的
+  // 格式以 localStorage 为准，编码卡住时明确报错指出该改哪一项。
 
-  // 上游这条断言写的是「H.264 + 192 kbps 音频，一分钟大约 70~80 MB」，但它用的是
-  // `{ ...DEFAULT_SETTINGS }`——默认格式一改成 VP9（码率效率 0.65）数字就对不上了。
-  // 断言的意图没变，所以这里把格式钉死成它当年假设的 H.264 / MP4。
+  // 上游这条断言写的是「H.264 + 192 kbps 音频，一分钟大约 70~80 MB」，这里把格式
+  // 钉死成 H.264 / MP4，使断言不受默认格式未来改动的影响（当前默认本就是 H.264）。
   {
     file: 'tests/export.test.js',
     find: "    const s = { ...DEFAULT_SETTINGS, video: true, includeAudio: true, audio: false };",
     replace: "    const s = { ...DEFAULT_SETTINGS, codec: 'avc', format: 'mp4', video: true, includeAudio: true, audio: false };",
     expect: 1,
-    why: '默认导出格式改成 VP9 后，这条体积估算断言仍应按它原本假设的 H.264 计算',
+    why: '把这条体积估算断言钉死成 H.264 / MP4，使其不受默认格式未来改动影响',
   },
 
   // 诊断：导出卡住时要把「当前停在哪一步」读出来（exporter.js 里记的阶段面包屑）——
@@ -461,7 +450,7 @@ const canSaveLocally = () => hostReady();`,
   {
     file: 'src/ui/export-dialog.js',
     find: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos } from '../otools/ui.js';",
-    replace: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos, chooseExportPath, revealExportPath } from '../otools/ui.js';\nimport { probeCodecs, summarizeProbes } from '../otools/codec-probe.js';\nimport { nativeH264Reason, nativeH264Available, installFfmpeg, reprobeNativeH264 } from '../otools/native-encoder.js';",
+    replace: "import { hostReady, hostMessage, saveBlobAs, saveBlobToVideos, chooseExportPath, revealExportPath } from '../otools/ui.js';\nimport { probeCodecs, summarizeProbes } from '../otools/codec-probe.js';\nimport { nativeH264Reason, nativeH264Error, nativeH264Available, installFfmpeg, reprobeNativeH264 } from '../otools/native-encoder.js';",
     expect: 1,
     why: '诊断：导入裸 WebCodecs 探测 + 原生 H.264 状态，卡住时告诉用户到底哪个编码真出不了帧、原生为什么没走',
   },
@@ -491,6 +480,12 @@ const canSaveLocally = () => hostReady();`,
     replace: `  /* 原生 H.264 提示：H.264/MP4 + 本机没装 ffmpeg 时，提示一键安装并装完重探。 */
   let nativeHintReq = 0;
   let nativeHintBusy = false;
+  // 失败时把宿主给的原话也显示出来：只有一个笼统的 invoke-failed，用户没法判断
+  // 是原生库版本旧（Unknown method）、宿主没加载 native，还是权限问题。
+  function nativeHintRawError() {
+    const raw = nativeH264Error();
+    return raw ? \`（宿主返回：\${raw}）\` : '';
+  }
   async function refreshNativeHint() {
     const my = ++nativeHintReq;
     if (s.codec !== 'avc' || s.format !== 'mp4' || !s.video) {
@@ -542,10 +537,10 @@ const canSaveLocally = () => hostReady();`,
       : reason === 'host-unavailable'
         ? '当前不在 OTools 宿主里，原生 H.264 编码不可用。改用 VP9 / WebM 也能导出。'
         : reason === 'invoke-failed'
-          ? '宿主原生编码调用失败，原生 H.264 暂时不可用。请确认用的是最新版插件，或改用 VP9 / WebM。'
+          ? '宿主原生编码调用失败：本机已在 OTools 宿主中，但原生模块（otools-puter-video）未能响应。常见原因是插件里的 lib/macOS.dylib 版本过旧、不含硬件编码命令（宿主报 Unknown method），或宿主没加载它——请更新/重装 otools-puter-video 与 OTools 宿主后重试。' + nativeHintRawError()
           : reason === 'not-probed'
             ? '正在检测原生 H.264 编码…'
-            : \`原生 H.264 不可用（\${reason}）。改用 VP9 / WebM 也能导出。\`;
+            : \`原生 H.264 不可用（\${reason}）。请安装带 h264_videotoolbox 的 ffmpeg（brew install ffmpeg），或改用 VP9 / WebM。\`;
     nativeH264Hint.replaceChildren(h('p', text));
   }
 
@@ -896,7 +891,7 @@ export function currentExportParams() {
         const stage = currentExportStage();
         const canTryVp9 = stallKind === 'video' && s.codec !== 'vp9' && (!caps || caps.video.includes('vp9'));
         const headline = canTryVp9
-          ? \`导出卡住：\${codecLabel} 编码在当前环境没有响应（系统编码器在部分环境会静默挂起）。请在导出设置里改用「VP9 / WebM」后重试——VP9 是软件编码，不依赖系统编码器；或降低分辨率、帧率，或改用 GIF 导出。\`
+          ? \`导出卡住：H.264 编码在当前环境没有响应（系统编码器在部分环境会静默挂起）。请确认已安装带 h264_videotoolbox 的 ffmpeg（brew install ffmpeg）且使用的是最新版 OTools 宿主与 otools-puter-video 插件；或在导出设置里改用「VP9 / WebM」作为替代。\`
           : '导出卡住：编码一直没有进度。请尝试降低分辨率或帧率、缩短导出范围，或改用 GIF 导出。';
         // 先把明确的报错亮给用户；编码能力用**裸 WebCodecs** 探测确认（绕开渲染、
         // 绕开 mediabunny，只问浏览器自己能不能真编出帧），拿到结论后**就地补到报错里**。
@@ -907,7 +902,10 @@ export function currentExportParams() {
         if (stallKind === 'video' && s.codec === 'avc' && s.format === 'mp4') {
           const why = nativeH264Reason();
           if (why === 'ffmpeg-missing-or-no-videotoolbox') nativeHint = '原生 H.264 也没启用：本机未装 ffmpeg，或 ffmpeg 不含 h264_videotoolbox 编码器。装一下 brew install ffmpeg，就能用 Apple 硬件 H.264 稳定导出、不再卡 0%。';
-          else if (why === 'invoke-failed') nativeHint = '原生 H.264 也没启用：宿主原生编码调用失败。请确认装的是最新版插件、且宿主支持原生插件。';
+          // invoke-failed = 宿主在、原生库也加载了，但 ffmpeg_probe 没有应答。最常见的原因
+          // 是插件里那颗 lib/macOS.dylib 是旧版本（不含 ffmpeg_probe），宿主拿到 Unknown
+          // method 就只能当调用失败。所以这里要把「重装/更新插件」讲成首要动作。
+          else if (why === 'invoke-failed') nativeHint = '原生 H.264 也没启用：宿主原生编码调用失败，通常是因为插件里的原生模块（lib/macOS.dylib）版本过旧、不含硬件编码命令，或宿主未加载它。请更新/重装 otools-puter-video 插件与 OTools 宿主后重试；装好后本插件会用 Apple 硬件 H.264 稳定导出。';
           else if (why === 'host-unavailable') nativeHint = '原生 H.264 也没启用：当前不在 OTools 宿主里。';
           else if (why && why !== 'ok' && why !== 'not-probed') nativeHint = \`原生 H.264 也没启用：\${why}。\`;
         }

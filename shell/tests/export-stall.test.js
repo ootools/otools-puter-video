@@ -81,10 +81,9 @@ afterEach(() => {
 });
 
 describe('默认导出格式', () => {
-  it('默认是 VP9 / WebM，不是 H.264 / MP4', () => {
-    // H.264 / HEVC 走的是系统（硬件）编码器，在部分 webview 里会静默挂起。
-    expect(DEFAULT_SETTINGS.codec).toBe('vp9');
-    expect(DEFAULT_SETTINGS.format).toBe('webm');
+  it('默认是 H.264 / MP4（用户要求 H.264 必须支持；不可用时由导出对话框协助安装依赖）', () => {
+    expect(DEFAULT_SETTINGS.codec).toBe('avc');
+    expect(DEFAULT_SETTINGS.format).toBe('mp4');
   });
 });
 

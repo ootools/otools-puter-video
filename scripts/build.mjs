@@ -11,12 +11,61 @@
  * 依赖（`npm install` 一次即可）：vite、@fontsource/*、lucide、mediabunny、
  * @mediapipe/tasks-vision。不需要 Rust、不需要 Puter。
  */
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { build as viteBuild } from 'vite';
 
 import { repoRoot, distDir, prepareTree, sweepDist, collectEmitted, viteBin } from './tree.mjs';
+
+/**
+ * 前端构建前把过期的原生编码库补上。
+ *
+ * 2026-10 实机故障：改了 native/src/lib.rs（新增 ffmpeg_probe / encode_h264 /
+ * install_ffmpeg）但没重编 lib/macOS.dylib，宿主加载旧库后新命令返回
+ * "Unknown method"，前端只看到 `invoke-failed`，于是跳过原生 H.264 快路径、
+ * 回落到会卡死在第 8 帧的 WebCodecs 编码。整个链条没有任何报错指向真因。
+ *
+ * 所以这里用 mtime 判断：源码比 lib/ 里的产物新（或产物压根没有）就顺手重编，
+ * 让 `npm run build` 的产物自包含。非 macOS、没 cargo、native/ 里没 crate 时
+ * 跳过——那些环境本来就用不了 h264_videotoolbox，前端有 VP9/WebM 兜底。
+ */
+function ensureNativeLib() {
+  if (process.platform !== 'darwin') return;
+  const nativeDir = path.join(repoRoot, 'native');
+  if (!fs.existsSync(path.join(nativeDir, 'Cargo.toml'))) return;
+
+  const built = path.join(repoRoot, 'lib', 'macOS.dylib');
+  const sources = [];
+  const collect = (dir) => {
+    for (const name of fs.readdirSync(dir)) {
+      const full = path.join(dir, name);
+      const stat = fs.lstatSync(full);
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        if (path.basename(full) !== 'target') collect(full); // target/ 是产物不是源
+      } else if (/\.(rs|toml|lock)$/i.test(name)) {
+        sources.push(full);
+      }
+    }
+  };
+  collect(nativeDir);
+
+  if (fs.existsSync(built)) {
+    const libMtime = fs.statSync(built).mtimeMs;
+    if (!sources.some((file) => fs.statSync(file).mtimeMs > libMtime)) return;
+    console.log('检测到 native/ 源码比 lib/macOS.dylib 新 → 重编译原生编码库');
+  }
+
+  try {
+    execFileSync('cargo', ['--version'], { stdio: 'ignore' });
+  } catch {
+    console.warn('警告：原生编码库缺失/过期，但本机没有 cargo。H.264 将回落浏览器编码（可能卡在第 8 帧）。');
+    return;
+  }
+  execFileSync(process.execPath, [path.join(repoRoot, 'scripts', 'build-native.mjs')], { stdio: 'inherit' });
+}
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -26,6 +75,7 @@ function arg(name, fallback = null) {
 const has = (name) => process.argv.includes(`--${name}`);
 
 async function main() {
+  ensureNativeLib();
   const { buildDir } = prepareTree();
   if (has('tree')) {
     console.log(`\n只合成了构建树：${path.relative(repoRoot, buildDir)}`);

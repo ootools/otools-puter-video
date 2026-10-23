@@ -7,9 +7,13 @@
  * 扁平结构（plugin.json 在 ZIP 根）与「单一顶层目录」两种布局宿主都认，
  * 这里用扁平。
  *
- * 本插件是**纯前端**插件（没有 native cdylib），所以：
- *   - 不校验 lib/；
- *   - 用 `productionManifest` 去掉开发期配置（devUrl / quickDev），
+ * 本插件**带 native cdylib**（native/ 这个 Rust crate，提供 ffmpeg 硬件 H.264 编码），
+ * 所以：
+ *   - **必须校验 lib/ 没过期**（见 assertNativeLibFresh）：否则会把不含新命令的旧
+ *     .dylib 打进包，宿主加载后调 ffmpeg_probe 得到 "Unknown method"，前端判定
+ *     `invoke-failed` → 原生快路径被跳过 → 回落到会卡死在第 8 帧的 WebCodecs
+ *     H.264。这套失效是**静默**的，没有任何报错指向真正的根因，务必拦在这里；
+ *   - 用 `productionManifest` 去掉开发期配置（devUrl / quickDev / native.autoReload），
  *     否则 OTools 的正式包校验会以「正式包不能启用开发模式」拒收。
  *
  * 用法：node scripts/pack-plugin.mjs [--out dist-pack] [--version 0.1.0]
@@ -123,11 +127,61 @@ export function productionManifest(manifest, version = '') {
   const result = { ...manifest, version: next };
   delete result.devUrl;
   delete result.quickDev;
-  // 本插件没有 native；若将来加了，autoReload 是开发期热重载开关，同样要关掉。
+  // native/ 这个 crate 存在時，autoReload 是开发期热重载开关，正式包要关掉。
   if (result.native && typeof result.native === 'object') {
     result.native = { ...result.native, autoReload: false };
   }
   return result;
+}
+
+/**
+ * 原生库过期自检。
+ *
+ * 背景（2026-10 实机故障）：改了 native/src/lib.rs（新增 ffmpeg_probe /
+ * encode_h264 / install_ffmpeg）却没重编 lib/macOS.dylib，打包脚本照旧把旧库打进
+ * .oplg。宿主加载后新命令返回 "Unknown method"，JS 侧只能看到「宿主原生编码调用
+ * 失败」（reason: invoke-failed），于是跳过原生快路径、回落到 WebCodecs H.264，
+ * 表现为导出卡在「编码第 8 / 1465 帧」。**整条链路没有任何一处报错指向真因**。
+ *
+ * 这里用 mtime 兜底：native/ 下任一源文件比 lib/<platform>.dylib 新，就判定过期
+ * 并直接让打包失败——宁可打包报错，也不要再出一个「H.264 导出卡死」的包。
+ */
+function assertNativeLibFresh(libDir, platformKey) {
+  const libName = PLATFORM_PACK_LIB[platformKey] || 'macOS.dylib';
+  const built = path.join(libDir, libName);
+  if (!fs.existsSync(built)) return; // 该平台库不存在时不拦（非 macOS 上跳过）
+
+  const sources = [];
+  const collectSources = (dir) => {
+    for (const name of fs.readdirSync(dir)) {
+      const full = path.join(dir, name);
+      const stat = fs.lstatSync(full);
+      if (stat.isSymbolicLink()) continue;
+      if (stat.isDirectory()) {
+        // target/ 是构建产物，不是源；别把「刚编译过」当成「源码没变」。
+        if (path.basename(full) !== 'target') collectSources(full);
+      } else if (/\.(rs|toml|lock)$/i.test(name)) {
+        sources.push(full);
+      }
+    }
+  };
+  const nativeDir = path.join(root, 'native');
+  if (fs.existsSync(nativeDir)) collectSources(nativeDir);
+
+  const libMtime = fs.statSync(built).mtimeMs;
+  const stale = sources.filter((file) => fs.statSync(file).mtimeMs > libMtime);
+  if (stale.length === 0) return;
+
+  const sample = stale
+    .slice(0, 5)
+    .map((file) => `  - ${path.relative(root, file)}（${new Date(fs.statSync(file).mtimeMs).toLocaleString('zh-CN')}）`)
+    .join('\n');
+  throw new Error(
+    `lib/${libName}（${new Date(libMtime).toLocaleString('zh-CN')}）比 native/ 源码旧，` +
+      `打进包会让宿主加载不到新命令（表现为 H.264 导出卡在第 8 帧 / 原生编码调用失败）。\n` +
+      `较新的源文件（${stale.length} 个，前 5 个）：\n${sample}\n` +
+      `请先执行：node scripts/build-native.mjs`,
+  );
 }
 
 function main() {
@@ -146,6 +200,9 @@ function main() {
     const full = path.join(root, logo);
     if (fs.existsSync(full)) entries.push({ name: logo, data: fs.readFileSync(full) });
   }
+
+  // 3') 自检：lib/ 里的原生库必须比 native/ 源码新（防止旧 .dylib 静溜进包）
+  assertNativeLibFresh(path.join(root, 'lib'), arg('platform', '').trim().toLowerCase() || 'macos');
 
   // 3) 前端产物 dist/ 与原生编码库 lib/（lib/ 由 scripts/build-native.mjs 生成；
   // macOS 上是 lib/macOS.dylib，宿主按 plugin.json 的 native.libDir 加载）。

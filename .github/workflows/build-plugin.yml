@@ -1,8 +1,13 @@
 # 构建 Video Studio 的 OTools 插件前端并上传产物。
 # 触发：push 到 main、PR、手动。
 #
-# 本 workflow 只构建**前端**：插件是纯前端的（没有 native cdylib），
-# 产物就是 dist/ 这一份静态资源，拷到 otools 仓库的 plugins/otools-puter-video/dist 即可用。
+# 本 workflow 只构建**前端**：产物就是 dist/ 这一份静态资源，拷到 otools 仓库的
+# plugins/otools-puter-video/dist 即可用。
+#
+# 原生编码库（lib/macOS.dylib，Apple 硬件 H.264）**不在这里构建**——它只能在 macOS
+# 上编，且 lib/ 走 .gitignore。正式发布那里由 release-plugin.yml 的 native job 单独
+# 产出并汇入打包，见该文件的注释。所以本 workflow 产出的 .oplg 不含原生编码，
+# 仅供前端回归验证，不要直接当发布包发给用户。
 #
 # 这里跑的测试是**上游的测试套件**（100 个文件），跑在移植后的构建树上——
 # 所以它同时也是移植层的回归：某条 shell/edits.mjs 对不上上游时，

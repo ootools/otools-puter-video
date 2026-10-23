@@ -31,7 +31,43 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 原生编码库（lib/macOS.dylib）必须在 macOS 上编：它是 Apple 硬件 H.264
+  # （h264_videotoolbox）的入口，没有它就只能走浏览器 WebCodecs，而后者在部分
+  # webview 里会把 H.264 编到第 8 帧静默挂起。
+  #
+  # 这里是**发布缺件事故的根因**（2026-10-23 定位）：v0.2.0 及更早的 release
+  # 资产里完全没有 lib/ —— lib/ 被 .gitignore 挡着、且编译只能在 macOS 上做，
+  # 于是所有从市场装的实例都拿不到原生编码，必然卡帧。从 v0.2.1 起把它们分开编、
+  # 再汇入打包。
+  native:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: 确认 Rust 工具链
+        run: |
+          if ! command -v cargo >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+          cargo --version
+      - name: 编译原生编码库
+        run: node scripts/build-native.mjs
+      - name: 断言产物存在
+        run: test -f lib/macOS.dylib && ls -lh lib/macOS.dylib
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-lib
+          path: lib/macOS.dylib
+          if-no-files-found: error
+          retention-days: 14
+
   build:
+    needs: native
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
@@ -48,6 +84,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: 取回原生编码库
+        uses: actions/download-artifact@v4
+        with:
+          name: native-lib
+          path: lib
+      # 必须 touch：native job 先跑完，本 job 的 checkout 时间反而比 .dylib 新，
+      # 会被 pack-plugin.mjs 的过期校验判成「源码改动没重编」而拦下发布。
+      # 这里的 .dylib 刚由同一 commit 的 native job 产出，本来就是最新的。
+      - name: 固定原生库时间戳
+        run: |
+          find lib -type f -exec touch {} +
+          ls -lh lib/
       - name: 校验版本、标签和发布开关
         id: meta
         env:
