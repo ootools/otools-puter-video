@@ -4,11 +4,15 @@ import { isFavorite, toggleFavorite, setFavorite, favoriteIds, onFavoritesChange
 import { tabLayout, tileGrid, tile, categoryIds } from '../src/ui/panels/common.js';
 import { prefs, setPref } from '../src/ui/prefs.js';
 import { mediaTab, assetFacts } from '../src/ui/panels/media.js';
+import { filtersTab } from '../src/ui/panels/filters.js';
 import { EditorStore } from '../src/model/store.js';
 import { createActions } from '../src/ui/actions.js';
 import { createBin, moveAssets } from '../src/model/bins.js';
 import { allClips, mainTrack } from '../src/model/timeline.js';
-import { fixture } from './helpers.js';
+import { makeClip } from '../src/model/project.js';
+import { createCompound } from '../src/model/compound.js';
+import { fixture, clip } from './helpers.js';
+import { Emitter } from '../src/lib/emitter.js';
 
 const KEY = 'video-studio:prefs';
 const stored = () => JSON.parse(localStorage.getItem(KEY) || '{}');
@@ -155,10 +159,12 @@ describe('media tab', () => {
 
   function mount(p = fixture()) {
     store = new EditorStore(p);
-    const ctx = { store, player: null, library: { backend: { kind: 'memory' } }, media: { poster: () => Promise.resolve(null) } };
+    const media = Object.assign(new Emitter(), { poster: () => Promise.resolve(null), missing: new Set() });
+    const ctx = { store, player: null, library: { backend: { kind: 'memory' } }, media };
     ctx.actions = createActions(ctx);
     actions = ctx.actions;
     tab = mediaTab(ctx);
+    tab.ctx = ctx;
     document.body.append(tab.el);
     return tab;
   }
@@ -228,6 +234,39 @@ describe('media tab', () => {
     expect(allClips(store.project)).toHaveLength(0);
   });
 
+  it('will not delete media from inside a compound clip when clips outside it use the media', async () => {
+    const p = fixture();
+    const [a, b] = [makeClip('video', { assetId: 'vid', start: 0, duration: 5e6 }), makeClip('video', { assetId: 'silent', start: 5e6, duration: 5e6 })];
+    mainTrack(p).clips.push(a, b);
+    const comp = createCompound(p, [b.id], { ripple: true, linkOverlays: true });
+    mount(p);
+    store.openCompound(comp.id);
+    tab.el.querySelector('[data-cat="project"]').click();
+    const byName = (n) => [...tab.el.querySelectorAll('.tile')].find((t) => t.querySelector('.tile-label')?.textContent === n);
+    byName('vid').click();
+    await flush();
+    tab.el.querySelector('.media-selbar [data-tip="Delete"]').click();
+    await flush();
+    expect(document.querySelector('dialog[open]')).toBeNull();
+    expect(document.querySelector('.toast')?.textContent).toContain('vid is also used outside this compound clip');
+    expect(store.project.assets.vid).toBeTruthy();
+  });
+
+  it('marks media whose file is missing', async () => {
+    mount();
+    tab.el.querySelector('[data-cat="project"]').click();
+    const vidTile = () => [...tab.el.querySelectorAll('.tile')].find((t) => t.querySelector('.tile-label')?.textContent === 'vid');
+    expect(vidTile().querySelector('.tile-sub.missing')).toBeNull();
+    const media = tab.ctx.media;
+    store.project.assets.vid.hash = 'hv';
+    media.missing = new Set(['hv']);
+    media.emit('missing');
+    await flush();
+    await new Promise((r) => setTimeout(r, 120));
+    expect(vidTile().querySelector('.tile-sub.missing')?.textContent).toBe('File missing');
+    expect(vidTile().getAttribute('aria-label')).toContain('file missing');
+  });
+
   it('describes media facts', () => {
     expect(assetFacts({ kind: 'video', duration: 12e6, width: 1920, height: 1080, size: 3_400_000 })).toBe('Video · 00:12 · 1920×1080 · 3.4 MB');
     expect(assetFacts({ kind: 'image', width: 800, height: 600, size: 0 })).toBe('Photo · 800×600');
@@ -245,5 +284,33 @@ describe('media tab', () => {
     const [other] = await acts.importFiles([new File(['x'], 'b.png', { type: 'image/png' })], { folder: 'missing' });
     expect(other.folder).toBeUndefined();
     void actions;
+  });
+});
+
+describe('filters tab', () => {
+  it('shows the filter just applied or undone on the selected clip', () => {
+    const p = fixture();
+    const v = clip('video', 0, 5);
+    mainTrack(p).clips.push(v);
+    const store = new EditorStore(p);
+    const ctx = { store };
+    ctx.actions = createActions(ctx);
+    const tab = filtersTab(ctx);
+    document.body.append(tab.el);
+    store.select(v.id);
+    const tileFor = (label) => tab.el.querySelector(`.tile[aria-label="${label}"]`);
+    const pressed = () => [...tab.el.querySelectorAll('.tile[aria-pressed=true]')].map((t) => t.getAttribute('aria-label'));
+    const vivid = 'Apply Vivid filter to clip';
+    tileFor(vivid).focus();
+    tileFor(vivid).click();
+    expect(store.selected.clip.filter.id).toBe('vivid');
+    expect(pressed()).toEqual([vivid]);
+    expect(tileFor('Remove filter from clip')).toBeTruthy();
+    // Keyboard focus stays on the tile.
+    expect(document.activeElement).toBe(tileFor(vivid));
+    store.undo();
+    expect(pressed()).toEqual([]);
+    expect(tileFor('Remove filter from clip')).toBe(null);
+    tab.dispose();
   });
 });

@@ -10,7 +10,8 @@ import { icon } from '../../lib/icons.js';
 import { US } from '../../lib/time.js';
 import { findClip } from '../../model/timeline.js';
 import { valueAt, keyIndexAt, baseValue } from '../../model/keyframes.js';
-import { sliderField, colorField, switchField, section } from '../controls.js';
+import { sliderField, colorField, switchField, section, fitTabs } from '../controls.js';
+import { menuButton } from '../menu.js';
 
 let seq = 0;
 export const uidFor = (p) => `insp-${p}-${++seq}`;
@@ -72,12 +73,21 @@ export function createClipView(ctx, id) {
     },
     /**
      * Edit the clip. key names the control so consecutive drag steps merge
-     * into one undo step; final ends that run.
+     * into one undo step; final ends that run. A one-off edit that changes
+     * nothing (a reset at the defaults) adds no undo step.
      */
     edit(label, fn, { key = null, final = true } = {}) {
-      const ok = actions.editClip(id, label, fn, key ? { coalesce: `${key}:${id}` } : {});
+      let same = false;
+      const once = (c, ...rest) => {
+        const before = JSON.stringify(c);
+        const r = fn(c, ...rest);
+        if (r === false) return false;
+        same = JSON.stringify(c) === before;
+        return same ? false : r;
+      };
+      const ok = actions.editClip(id, label, key ? fn : once, key ? { coalesce: `${key}:${id}` } : {});
       if (final) store.seal();
-      return ok;
+      return same || ok;
     },
     /** Keyframable value: a key at the playhead when the prop has keys, else the base value. */
     animate(prop, value, { label = 'Edit', final = true, key = prop } = {}) {
@@ -143,6 +153,13 @@ export function slider(view, { label, min, max, step = 1, unit = '', decimals, g
     decimals,
     value: get(c),
     onInput: (v, final) => set(v, final),
+    read: () => (view.clip ? get(view.clip) : undefined),
+    // The value shown, typed again, changes nothing, unless the prop has keys
+    // elsewhere (it adds one at the playhead).
+    unchanged: (v) => {
+      const clip = view.clip;
+      return Boolean(clip) && get(clip) === v && (!prop || view.keyState(prop) !== 'some');
+    },
     keyframe: prop
       ? {
         onToggle: () => view.actions.toggleKeyframe(view.id, prop),
@@ -177,6 +194,14 @@ export function slider(view, { label, min, max, step = 1, unit = '', decimals, g
   };
   let last = get(c);
   let lastKey = null;
+  // After a drag, show what was stored: an edit can be limited or refused
+  // (a keyed value with the playhead off the clip).
+  range.addEventListener('change', () => {
+    const clip = view.clip;
+    if (!clip) return;
+    last = get(clip);
+    write(last);
+  });
   view.bind(() => {
     const clip = view.clip;
     if (!clip) return;
@@ -254,12 +279,16 @@ export function row(label, control, { id } = {}) {
 /**
  * Tabs with tab panels. items: [{ id, label }]. render(id) builds the panel
  * content. Returns { list, panel, select(id), current }.
+ * more: tabs that don't fit the row go into a More menu (the selected one
+ * stays in the row); then put el (the row with the button) on the page and
+ * call fit() when its width changes.
  */
-export function tabSet({ label, items, value, onChange, className = '' }) {
+export function tabSet({ label, items, value, onChange, className = '', more = false }) {
   const base = uidFor('tabs');
   const panel = h('div.insp-tabpanel', { role: 'tabpanel', id: `${base}-panel`, tabindex: '-1' });
   const list = h(`div.insp-tabs${className ? '.' + className : ''}`, { role: 'tablist', 'aria-label': label });
   let current = items.some((i) => i.id === value) ? value : items[0]?.id;
+  let selected = null;
   const btns = items.map((it) => {
     const b = h('button.insp-tab', { type: 'button', role: 'tab', id: `${base}-${it.id}`, 'aria-controls': `${base}-panel`, 'aria-selected': String(it.id === current), tabindex: it.id === current ? '0' : '-1', dataset: { tab: it.id } }, it.label);
     b.addEventListener('click', () => {
@@ -277,33 +306,69 @@ export function tabSet({ label, items, value, onChange, className = '' }) {
       b.tabIndex = on ? 0 : -1;
     });
     const b = btns.find((x) => x.dataset.tab === id);
-    if (b) panel.setAttribute('aria-labelledby', b.id);
+    if (b) {
+      panel.setAttribute('aria-labelledby', b.id);
+      selected?.(b);
+    }
   };
+  // Arrow keys move between the tabs on show (the rest are in More).
   list.addEventListener('keydown', (e) => {
-    const i = btns.indexOf(document.activeElement);
+    const shown = btns.filter((b) => !b.hidden);
+    const i = shown.indexOf(document.activeElement);
     if (i < 0) return;
     let j = -1;
-    if (e.key === 'ArrowRight') j = (i + 1) % btns.length;
-    if (e.key === 'ArrowLeft') j = (i - 1 + btns.length) % btns.length;
+    if (e.key === 'ArrowRight') j = (i + 1) % shown.length;
+    if (e.key === 'ArrowLeft') j = (i - 1 + shown.length) % shown.length;
     if (e.key === 'Home') j = 0;
-    if (e.key === 'End') j = btns.length - 1;
+    if (e.key === 'End') j = shown.length - 1;
     if (j >= 0) {
       e.preventDefault();
       e.stopPropagation();
-      btns[j].focus();
-      btns[j].click();
+      shown[j].focus();
+      shown[j].click();
     }
   });
   list.append(...btns);
   select(current);
-  return {
+  const set = {
     list,
+    el: list,
     panel,
     select,
+    fit() {},
     get current() {
       return current;
     },
   };
+  if (!more) return set;
+
+  const moreBtn = h('button.insp-tabs-more', { type: 'button', 'aria-label': 'More tabs', 'data-tip': 'More tabs', hidden: true }, icon('more', 16));
+  const bar = h('div.insp-tabs-bar', list, moreBtn);
+  let overflow = [];
+  menuButton(moreBtn, () => overflow.map((it) => ({ label: it.label, onSelect: () => {
+    btns[items.indexOf(it)].click();
+    btns[items.indexOf(it)].focus();
+  } })), { label: 'More tabs', align: 'end' });
+  const fit = () => {
+    const avail = bar.clientWidth;
+    if (avail <= 0) return;
+    bar.classList.add('is-measuring');
+    btns.forEach((b) => (b.hidden = false));
+    moreBtn.hidden = false;
+    const widths = btns.map((b) => b.getBoundingClientRect().width);
+    const gap = parseFloat(getComputedStyle(list).columnGap) || 0;
+    const moreW = moreBtn.getBoundingClientRect().width;
+    bar.classList.remove('is-measuring');
+    const shown = fitTabs(widths, avail, moreW + gap, items.findIndex((it) => it.id === current), gap);
+    btns.forEach((b, i) => (b.hidden = !shown.includes(i)));
+    overflow = items.filter((_, i) => !shown.includes(i));
+    moreBtn.hidden = !overflow.length;
+  };
+  // A tab picked from More takes a place in the row.
+  selected = (b) => b.hidden && fit();
+  set.el = bar;
+  set.fit = fit;
+  return set;
 }
 
 /**
@@ -357,6 +422,25 @@ export function choiceGrid({ label, items, value, onPick, className = '' }) {
   grid.append(...btns);
   set(value);
   return { el: grid, set, buttons: btns };
+}
+
+/**
+ * Run fn (an edit that may rebuild the control that has focus), then, if
+ * focus was lost (to the page, or onto a control that is now disabled),
+ * focus the first of finders() that gives a usable element. Keeps the next
+ * Space from playing the timeline instead of pressing a button.
+ */
+export function keepFocus(fn, ...finders) {
+  fn();
+  const a = document.activeElement;
+  if (a && a !== document.body && a.isConnected && !a.disabled) return;
+  for (const find of finders) {
+    const el = find();
+    if (el?.isConnected && !el.disabled && !el.closest('[hidden]')) {
+      el.focus();
+      return;
+    }
+  }
 }
 
 /** Seconds with one decimal, for labels. */

@@ -4,6 +4,7 @@
  */
 import { h, announce, clamp } from '../lib/dom.js';
 import { appIcon } from '../lib/icons.js';
+import { shortcutLabel } from '../lib/platform.js';
 import { timecode } from '../lib/time.js';
 import { EditorStore } from '../model/store.js';
 import { AutoSaver } from '../storage/library.js';
@@ -24,18 +25,52 @@ import { createMobileChrome } from './mobile.js';
 import { openExportDialog } from './export-dialog.js';
 import { openVoiceoverDialog } from './voiceover-dialog.js';
 import { openProjectSettings } from './project-settings.js';
-import { openDialog, toast, installTooltips } from './dialog.js';
+import { openDialog, toast, installTooltips, setTooltipShortcuts } from './dialog.js';
+import { confirmLeave, finishUploads } from './leave.js';
 import { openShortcutsDialog } from './shortcuts-dialog.js';
 import { createHistoryPanel } from './history-panel.js';
 import { createReviewPanel } from './review/review-panel.js';
-import { createEditAssistant } from './edit-assistant.js';
+import { createAiPanel } from './ai-panel.js';
 import { openPreferences, pref, onPrefsChange } from './preferences-dialog.js';
-import { prefs, setPref } from './prefs.js';
+import { prefs, setPref, onThemeChange } from './prefs.js';
+
+// Side panel width limits, and the narrowest player kept between them (the grid's minmax in editor.css).
+const PANEL_LIMITS = { left: [240, 720], right: [260, 640] };
+const MIN_PLAYER = 280;
+const RESIZERS = 8;
+
+/** The gallery cover is saved this long after the last edit (then when the browser is idle). */
+const COVER_DELAY = 8000;
+
+/** Run fn when the browser is idle (soon after, at the latest). Returns { cancel }. */
+function whenIdle(fn) {
+  if (typeof requestIdleCallback === 'function') {
+    const id = requestIdleCallback(fn, { timeout: 4000 });
+    return { cancel: () => cancelIdleCallback(id) };
+  }
+  const id = setTimeout(fn, 0);
+  return { cancel: () => clearTimeout(id) };
+}
+
+/**
+ * Side panel widths that fit in `room` px together. Wider panels give up their
+ * extra width in proportion; neither goes below its minimum.
+ */
+export function fitPanelWidths(left, right, room) {
+  const over = left + right - room;
+  if (!(over > 0)) return [left, right];
+  const spareL = Math.max(0, left - PANEL_LIMITS.left[0]);
+  const spareR = Math.max(0, right - PANEL_LIMITS.right[0]);
+  const k = spareL + spareR ? Math.min(1, over / (spareL + spareR)) : 0;
+  return [Math.round(left - spareL * k), Math.round(right - spareR * k)];
+}
 
 export class Editor {
-  constructor(root, { library, project, account, onExit, onNewProject, onOpenProject }) {
+  constructor(root, { library, project, claim, account, onExit, onNewProject, onOpenProject }) {
     this.root = root;
     this.library = library;
+    // This tab's claim on the project (see Library.claimProject), let go on dispose.
+    this._claim = claim;
     const store = new EditorStore(project, { toggles: prefs().toggles });
     this.store = store;
     store.on('toggles', () => setPref('toggles', { ...store.toggles }));
@@ -87,7 +122,8 @@ export class Editor {
       snapshotToMedia: () => this.exportStill({ toMedia: true }),
       saveNow: async () => {
         await this.saver.save();
-        announce('Saved');
+        if (this.saver.status === 'error') toast("Couldn't save. Retrying...", { kind: 'error' });
+        else announce('Saved');
       },
     };
     this.ctx = ctx;
@@ -107,14 +143,15 @@ export class Editor {
     if (!ctx.player.supported) toast('Your browser does not support WebGL2, so the preview is unavailable. Export still needs WebGL2 too.', { kind: 'error', duration: 10000 });
 
     const topbar = createTopbar(ctx);
+    this._topbar = topbar;
     ctx.assets = createAssetsPanel(ctx);
     ctx.playerView = createPlayerView(ctx);
     ctx.inspector = createInspector(ctx);
     ctx.timeline = createTimeline(ctx);
 
     const p = prefs();
-    this.el = h('div.editor', { style: { '--left-w': `${p.leftW}px`, '--right-w': `${p.rightW}px`, '--upper': String(p.upperH) } },
-      topbar.el,
+    // The workspace and, beside it, the AI sidebar (added once the mobile chrome knows the layout).
+    const body = h('div.editor-body',
       h('main#main.workspace', { tabindex: '-1' },
         h('h1.sr-only', `${project.name} - Video Studio editor`),
         h('div.upper',
@@ -128,73 +165,95 @@ export class Editor {
         ctx.timeline.el,
       ),
     );
+    this.el = h('div.editor', { style: { '--left-w': `${p.leftW}px`, '--right-w': `${p.rightW}px`, '--upper': String(p.upperH) } },
+      topbar.el,
+      body,
+    );
     ctx.history = createHistoryPanel(ctx);
     this.el.append(ctx.history.el);
     ctx.review = createReviewPanel(ctx);
     this.el.append(ctx.review.el);
     ctx.mobile = createMobileChrome(ctx, this.el);
-    ctx.assistant = createEditAssistant(ctx);
-    ctx.timeline.el.append(ctx.assistant.launcher);
-    this.el.append(ctx.assistant.el);
+    // Development builds make free sample clips with ?aitest (Puter's test mode).
+    ctx.aiTestMode = Boolean(import.meta.env?.DEV && new URLSearchParams(location.search).has('aitest'));
+    ctx.assistant = createAiPanel(ctx);
+    body.append(ctx.assistant.rail, ctx.assistant.el);
     root.replaceChildren(this.el);
     root.removeAttribute('aria-busy');
-    installTooltips(this.el);
+    // The saved panel widths are kept; the ones shown are fitted to the space there is.
+    this._panelW = { left: p.leftW, right: p.rightW };
+    this._workspace = body.querySelector('.workspace');
+    this._fitObserver = new ResizeObserver(() => this.fitPanels());
+    this._fitObserver.observe(this._workspace);
+    this.fitPanels();
+    // Rulers are drawn on canvases in theme colors, so redraw them when the theme changes.
+    this._offTheme = onThemeChange(() => {
+      ctx.timeline.render?.(true);
+      ctx.playerView.relayout?.();
+    });
+    installTooltips();
+    this._offTipKeys = setTooltipShortcuts((id) => {
+      const key = ctx.commands.keyFor(id);
+      return key ? shortcutLabel(key) : '';
+    });
 
     this._onKey = (e) => this.onKey(e);
     document.addEventListener('keydown', this._onKey);
     this._onUnload = (e) => {
-      if (store.dirty || library.pendingUploads) {
+      // pageLeaving: the user already chose to leave (signing out, closing the window).
+      if (!this.pageLeaving && (store.dirty || library.unsavedMedia)) {
         this.saver.save();
         e.preventDefault();
         e.returnValue = '';
       }
     };
     window.addEventListener('beforeunload', this._onUnload);
-    // Inside the Puter desktop, save before the window closes.
-    if (typeof puter !== 'undefined' && puter.env === 'app' && puter.ui?.onWindowClose) {
-      puter.ui.onWindowClose(async () => {
-        await this.saver.flush().catch(() => {});
-        await library.flushUploads().catch(() => {});
-        puter.exit();
-      });
-    }
     ctx.playerView.mounted?.();
     ctx.timeline.mounted?.();
     document.title = `${project.name} - Video Studio`;
     store.on('change', () => (document.title = `${store.project.name} - Video Studio`));
     this._coverTimer = null;
+    this._coverIdle = null;
     store.on('change', () => this._scheduleCover());
+    // Leaving the tab (or closing it): save a cover still waiting now.
+    this._onHidden = () => {
+      if (document.visibilityState === 'hidden' && this._coverDue) this.saveCover();
+    };
+    document.addEventListener('visibilitychange', this._onHidden);
     this._watchProxies();
+    // Media whose file is gone would just show black: say so and offer to relink.
+    ctx.actions.checkMissingMedia?.({ notify: true });
   }
 
   _resizer(dir, which) {
     const label = which === 'upper' ? 'Resize timeline' : which === 'left' ? 'Resize media panel' : 'Resize details panel';
     // A focusable separator needs a value: panel width in pixels, or the timeline's share of the height in percent.
     const p = prefs();
-    const [min, max, now] = which === 'left' ? [240, 720, p.leftW] : which === 'right' ? [260, 640, p.rightW] : [20, 75, Math.round((1 - p.upperH) * 100)];
+    const [min, max, now] = which === 'left' ? [...PANEL_LIMITS.left, p.leftW] : which === 'right' ? [...PANEL_LIMITS.right, p.rightW] : [20, 75, Math.round((1 - p.upperH) * 100)];
     const el = h(`div.resizer.${dir}`, { role: 'separator', tabindex: '0', 'aria-label': label, 'aria-orientation': dir === 'v' ? 'vertical' : 'horizontal', 'aria-valuemin': min, 'aria-valuemax': max, 'aria-valuenow': now });
+    if (which !== 'upper') (this._panelResizers ||= {})[which] = el;
     const apply = (delta) => {
-      const s = this.el.style;
-      if (which === 'left') {
-        const w = clamp((parseFloat(s.getPropertyValue('--left-w')) || 440) + delta, 240, 720);
-        s.setProperty('--left-w', `${w}px`);
-        setPref('leftW', w);
-        el.setAttribute('aria-valuenow', String(Math.round(w)));
-      } else if (which === 'right') {
-        const w = clamp((parseFloat(s.getPropertyValue('--right-w')) || 340) - delta, 260, 640);
-        s.setProperty('--right-w', `${w}px`);
-        setPref('rightW', w);
-        el.setAttribute('aria-valuenow', String(Math.round(w)));
-      } else {
-        const ws = this.el.querySelector('.workspace').getBoundingClientRect();
-        const cur = parseFloat(s.getPropertyValue('--upper')) || 0.56;
-        const v = clamp(cur + delta / ws.height, 0.25, 0.8);
-        s.setProperty('--upper', String(v));
-        setPref('upperH', v);
-        el.setAttribute('aria-valuenow', String(Math.round((1 - v) * 100)));
+      if (which === 'left' || which === 'right') {
+        // Resize from what is shown, never past the room left by the other panel and the player.
+        const room = this._panelRoom();
+        const [left, right] = this.shownPanelWidths(room);
+        const [w, other] = which === 'left' ? [left + delta, right] : [right - delta, left];
+        const [lo, hi] = PANEL_LIMITS[which];
+        const next = clamp(w, lo, Math.max(lo, Math.min(hi, room - other)));
+        this._panelW = which === 'left' ? { left: next, right } : { left, right: next };
+        setPref('leftW', this._panelW.left);
+        setPref('rightW', this._panelW.right);
+        this.fitPanels();
+        return;
       }
+      const s = this.el.style;
+      const ws = this.el.querySelector('.workspace').getBoundingClientRect();
+      const cur = parseFloat(s.getPropertyValue('--upper')) || 0.56;
+      const v = clamp(cur + delta / ws.height, 0.25, 0.8);
+      s.setProperty('--upper', String(v));
+      setPref('upperH', v);
+      el.setAttribute('aria-valuenow', String(Math.round((1 - v) * 100)));
       this.ctx.playerView.relayout?.();
-      if (which === 'left') this.ctx.assets.relayout?.();
     };
     el.addEventListener('pointerdown', (e) => {
       e.preventDefault();
@@ -239,8 +298,8 @@ export class Editor {
       if (e.key === 'Escape') t.blur();
       return;
     }
-    // Space and Enter activate focused buttons, except where a control opts in to play.
-    if ((e.key === ' ' || e.key === 'Enter') && t.matches?.('button, [role=button], [role=tab], [role=radio], [role=switch], a') && !t.closest('[data-space-plays]')) return;
+    // Space and Enter activate focused buttons and check boxes, except where a control opts in to play.
+    if ((e.key === ' ' || e.key === 'Enter') && t.matches?.('button, [role=button], [role=tab], [role=radio], [role=switch], [role=checkbox], input[type=checkbox], a') && !t.closest('[data-space-plays]')) return;
     // Arrow keys belong to sliders, tab lists and the timeline's own navigation.
     if (e.key.startsWith('Arrow') && (t.matches?.('input[type=range], [role=tab], [role=radio], [role=separator], [role=slider]') || t.closest?.('[data-own-arrows]'))) return;
     if (this.ctx.commands.handleKey(e)) {
@@ -293,19 +352,14 @@ export class Editor {
   applyLayout(id) {
     const l = LAYOUTS.find((x) => x.id === id) || LAYOUTS[0];
     const st = this.el.style;
-    st.setProperty('--left-w', `${l.leftW}px`);
-    st.setProperty('--right-w', `${l.rightW}px`);
+    this._panelW = { left: l.leftW, right: l.rightW };
     st.setProperty('--upper', String(l.upperH));
     setPref('leftW', l.leftW);
     setPref('rightW', l.rightW);
     setPref('upperH', l.upperH);
     setPref('layout', l.id);
-    for (const r of this.el.querySelectorAll('.resizer')) {
-      const label = r.getAttribute('aria-label');
-      if (label === 'Resize media panel') r.setAttribute('aria-valuenow', String(l.leftW));
-      else if (label === 'Resize details panel') r.setAttribute('aria-valuenow', String(l.rightW));
-      else r.setAttribute('aria-valuenow', String(Math.round((1 - l.upperH) * 100)));
-    }
+    this.el.querySelector('.resizer.h')?.setAttribute('aria-valuenow', String(Math.round((1 - l.upperH) * 100)));
+    this.fitPanels({ relayout: false });
     this.ctx.playerView.relayout?.();
     this.ctx.assets.relayout?.();
     this.ctx.timeline.render?.(true);
@@ -329,21 +383,54 @@ export class Editor {
     });
   }
 
+  /**
+   * Save the cover once editing pauses. It renders the frame on its own (a
+   * few milliseconds with a graphics card, much more without), so it waits
+   * for a quiet moment and then for the browser to be idle.
+   */
   _scheduleCover() {
-    clearTimeout(this._coverTimer);
-    this._coverTimer = setTimeout(() => this.saveCover(), 4000);
+    this._cancelCover();
+    this._coverDue = true;
+    this._coverTimer = setTimeout(() => {
+      this._coverTimer = null;
+      this._coverIdle = whenIdle(() => {
+        this._coverIdle = null;
+        this.saveCover();
+      });
+    }, COVER_DELAY);
   }
 
+  _cancelCover() {
+    clearTimeout(this._coverTimer);
+    this._coverTimer = null;
+    this._coverIdle?.cancel();
+    this._coverIdle = null;
+  }
+
+  /**
+   * Save the gallery cover: the cover frame (1 s in unless one is chosen),
+   * rendered on its own like a still export so the live preview is never
+   * moved. While playing it waits for the next pause.
+   */
   async saveCover() {
     const { store, player } = this.ctx;
     if (!player?.supported || store.duration <= 0) return;
+    if (player.playing) {
+      this._scheduleCover();
+      return;
+    }
+    this._cancelCover();
+    this._coverDue = false;
     try {
       const t = store.project.cover?.time ?? Math.min(store.duration - 1, 1_000_000);
-      const keep = player.previewTime;
-      player.previewTime = t;
-      const blob = await player.snapshot(480);
-      player.previewTime = keep;
-      player.invalidate();
+      const { renderStill } = await import('../engine/exporter.js');
+      const bmp = await renderStill(store.project, this.library, t, { maxWidth: 480 });
+      const c = document.createElement('canvas');
+      c.width = bmp.width;
+      c.height = bmp.height;
+      c.getContext('2d').drawImage(bmp, 0, 0);
+      bmp.close?.();
+      const blob = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.82));
       if (blob) await this.library.saveCover(store.project.id, blob);
     } catch {
       /* covers are cosmetic */
@@ -371,25 +458,109 @@ export class Editor {
     ];
   }
 
+  /**
+   * Save before the editor closes. When the edits can't be saved, ask whether
+   * to leave anyway; resolves false to stay (autosave keeps retrying).
+   * waitForUploads: also wait for media uploads (the page is going away).
+   */
+  prepareToLeave({ waitForUploads = false } = {}) {
+    // Asked twice (a double click, the window closing while asking): one question.
+    this._leaving ||= (async () => {
+      this.ctx.player?.pause();
+      let saved = true;
+      try {
+        await this.saver.flush();
+      } catch {
+        saved = false;
+      }
+      // Media still uploading keeps going after the editor closes, but not after the page does.
+      const media = waitForUploads ? await finishUploads(this.library) : 0;
+      if (saved && !media) return true;
+      return confirmLeave(this.library, { edits: !saved, media });
+    })().finally(() => (this._leaving = null));
+    return this._leaving;
+  }
+
+  /** Leave for the home screen (or another project). Resolves false when the user chose to stay. */
   async exit(opts = {}) {
-    this.ctx.player?.pause();
-    await this.saver.flush().catch(() => {});
-    await this.saveCover();
-    this.dispose();
+    // One exit at a time: a second click while leaving does nothing.
+    if (this._disposed || this._exiting) return false;
+    this._exiting = true;
+    try {
+      if (!(await this.prepareToLeave()) || this._disposed) return false;
+      await this.saveCover();
+      this.dispose();
+    } finally {
+      this._exiting = false;
+    }
     if (opts.open) this.onOpenProject?.(opts.open);
     else if (opts.create) this.onNewProject?.();
     else this.onExit?.();
+    return true;
+  }
+
+  /** The workspace's inner width (0 when unknown). */
+  _workspaceWidth() {
+    const ws = this._workspace;
+    if (!ws) return 0;
+    const cs = getComputedStyle(ws);
+    return Math.max(0, ws.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0));
+  }
+
+  /** Width the side panels can share: the workspace less the resizers and the narrowest player (Infinity off desktop or unknown). */
+  _panelRoom(width = this._workspaceWidth()) {
+    if (this.el.dataset.layout && this.el.dataset.layout !== 'desktop') return Infinity;
+    return width > 0 ? width - RESIZERS - MIN_PLAYER : Infinity;
+  }
+
+  /** The side panel widths on screen: the saved ones, narrowed to fit the window. */
+  shownPanelWidths(room = this._panelRoom()) {
+    const [left, right] = fitPanelWidths(this._panelW.left, this._panelW.right, room);
+    // The tablet layout has only the media panel beside the player.
+    const width = this.el.dataset.layout === 'tablet' ? this._workspaceWidth() : 0;
+    if (width > 0) return [Math.round(Math.max(PANEL_LIMITS.left[0], Math.min(left, width - RESIZERS / 2 - MIN_PLAYER))), right];
+    return [left, right];
+  }
+
+  /** Show the side panels at widths that fit (after a resize, a layout preset or a drag). */
+  fitPanels({ relayout = true } = {}) {
+    if (!this._panelW) return;
+    const width = this._workspaceWidth();
+    // Too narrow for both side panels and the player (a small window with the AI sidebar open):
+    // the tablet layout takes over, with Details in a sheet.
+    if (width > 0) this.ctx.mobile?.setNarrowWorkspace?.(width < PANEL_LIMITS.left[0] + PANEL_LIMITS.right[0] + MIN_PLAYER + RESIZERS);
+    const room = this._panelRoom(width);
+    const [left, right] = this.shownPanelWidths(room);
+    const st = this.el.style;
+    const changed = st.getPropertyValue('--left-w') !== `${left}px` || st.getPropertyValue('--right-w') !== `${right}px`;
+    st.setProperty('--left-w', `${left}px`);
+    st.setProperty('--right-w', `${right}px`);
+    for (const [which, w, other] of [['left', left, right], ['right', right, left]]) {
+      const [lo, hi] = PANEL_LIMITS[which];
+      this._panelResizers[which].setAttribute('aria-valuenow', String(Math.round(w)));
+      this._panelResizers[which].setAttribute('aria-valuemax', String(Math.round(Math.max(lo, Math.min(hi, room - other)))));
+    }
+    if (changed && relayout) {
+      this.ctx.playerView.relayout?.();
+      this.ctx.assets.relayout?.();
+    }
   }
 
   dispose() {
+    this._disposed = true;
+    this._fitObserver?.disconnect();
+    this._offTheme?.();
+    this._offTipKeys?.();
     this._offPrefs?.();
     this.ctx.history?.dispose?.();
     this.ctx.review?.dispose?.();
     this.ctx.assistant?.dispose?.();
-    clearTimeout(this._coverTimer);
+    this._cancelCover();
+    document.removeEventListener('visibilitychange', this._onHidden);
     document.removeEventListener('keydown', this._onKey);
     window.removeEventListener('beforeunload', this._onUnload);
     this.saver.dispose();
+    this._topbar?.dispose?.();
     this.ctx.mobile?.dispose?.();
     this.ctx.timeline?.dispose?.();
     this.ctx.playerView?.dispose?.();
@@ -400,5 +571,6 @@ export class Editor {
     this.proxies.dispose();
     this.media.dispose();
     this.library.releaseMedia();
+    this._claim?.release();
   }
 }

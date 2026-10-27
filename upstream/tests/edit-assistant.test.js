@@ -1,8 +1,7 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { EditorStore } from '../src/model/store.js';
 import { createActions } from '../src/ui/actions.js';
 import { createAssistantRunner, styleWords } from '../src/ui/assistant-actions.js';
-import { createEditAssistant, suggestionsFor } from '../src/ui/edit-assistant.js';
 import { mainTrack, allClips, findClip } from '../src/model/timeline.js';
 import {
   TOOLS, toolSpecs, validateCall, resolveClips, askForEdits, parseActionList, toolCallsFrom, summarize,
@@ -262,13 +261,13 @@ describe('performing edits', () => {
   it('runs captions and silence removal through their analysis steps', async () => {
     const { store, ctx, main } = setup(clip('video', 0, 10));
     const findSilences = vi.fn(async () => [{ start: s(2), end: s(3) }, { start: s(6), end: s(7) }]);
-    const generateCaptions = vi.fn(async (c, opts, { mode }) => {
+    const prepareCaptions = vi.fn(async (c, opts, { mode }) => () => {
       c.store.update('Generate captions', (p) => {
         p.tracks.unshift({ id: 'tc', kind: 'text', locked: false, hidden: false, muted: false, clips: [] });
       }, { keepEmptyTracks: true });
       return mode === 'replace' ? 7 : 3;
     });
-    const runner = createAssistantRunner(ctx, { findSilences, generateCaptions });
+    const runner = createAssistantRunner(ctx, { findSilences, prepareCaptions });
     const progress = [];
     const { results } = await runner.run([
       { name: 'remove_silences', args: { min_silence: 0.01, threshold_db: -5 } },
@@ -276,10 +275,45 @@ describe('performing edits', () => {
     ], { onProgress: (t) => progress.push(t) });
     expect(findSilences.mock.calls[0][1]).toMatchObject({ minSilence: 0.2, thresholdDb: -10, scope: 'main' });
     expect(main().clips.reduce((t, c) => t + c.duration, 0)).toBe(s(8));
-    expect(generateCaptions.mock.calls[0][1]).toMatchObject({ language: 'de', captionStyle: 'word-pop', preset: 'yellow-caption', maxWords: 12, scope: 'main' });
+    expect(prepareCaptions.mock.calls[0][1]).toMatchObject({ language: 'de', captionStyle: 'word-pop', preset: 'yellow-caption', maxWords: 12, scope: 'main' });
     expect(results.map((r) => r.text)).toEqual(['Removed 2 silent parts (2.0s in all)', 'Added 7 captions']);
     expect(progress).toContain('Listening for silences...');
     expect(store.history.undoStack).toHaveLength(1);
+  });
+
+  it('keeps edits and undos the user makes while captions are being made out of the request\'s undo step', async () => {
+    const { store, ctx } = twoClips();
+    const mark = (id) => (p) => { p.markers.push({ id, time: 0, label: '', color: 'red' }); };
+    store.update('Edit A', mark('a'));
+    store.update('Edit B', mark('b'));
+    let open;
+    const gate = () => new Promise((r) => (open = r));
+    const prepareCaptions = vi.fn(async () => {
+      await gate();
+      return () => (store.update('Generate captions', mark('cap')), 1);
+    });
+    const runner = createAssistantRunner(ctx, { prepareCaptions });
+    let running = runner.run([{ name: 'add_captions', args: {} }], { label: 'AI: captions' });
+    await vi.waitFor(() => expect(open).toBeTypeOf('function'));
+    store.update('User marker', mark('user'));
+    open();
+    let { entry } = await running;
+    expect(store.history.undoStack.map((e) => e.label)).toEqual(['Edit A', 'Edit B', 'User marker', 'AI: captions']);
+    expect(runner.undo(entry)).toBe(true);
+    expect(store.project.markers.map((m) => m.id)).toEqual(['a', 'b', 'user']);
+
+    // An undo meanwhile: the earlier steps stay as they were.
+    open = null;
+    running = runner.run([{ name: 'set_speed', args: { clips: ['first'], speed: 2 } }, { name: 'add_captions', args: {} }], { label: 'AI: speed and captions' });
+    await vi.waitFor(() => expect(open).toBeTypeOf('function'));
+    expect(store.history.undoLabel).toBe('AI: speed and captions');
+    store.undo();
+    open();
+    ({ entry } = await running);
+    expect(store.history.undoStack.map((e) => e.label)).toEqual(['Edit A', 'Edit B', 'User marker', 'AI: speed and captions']);
+    expect(mainTrack(store.project).clips[0].speed).toBe(1);
+    expect(runner.undo(entry)).toBe(true);
+    expect(store.project.markers.map((m) => m.id)).toEqual(['a', 'b', 'user']);
   });
 
   it('summarizes what was done for the chat and for follow-up requests', () => {
@@ -297,117 +331,8 @@ describe('performing edits', () => {
   });
 });
 
-describe('edit assistant panel', () => {
-  afterEach(() => {
-    document.body.replaceChildren();
-  });
-
-  function mount(opts) {
-    const { store, ctx, main } = twoClips();
-    ctx.commands = { keyFor: () => 'Mod+K' };
-    const a = createEditAssistant(ctx, opts);
-    document.body.append(a.launcher, a.el);
-    return { store, ctx, main, a };
-  }
-
-  it('suggests requests that fit the project', () => {
-    const { store, main } = twoClips();
-    expect(suggestionsFor(assistState(store))).toEqual(expect.arrayContaining(['Trim the first 2 seconds', 'Apply a warm look to all clips']));
-    store.select(main().clips[0].id);
-    expect(suggestionsFor(assistState(store))[0]).toBe('Speed up the selected clip 2x');
-    expect(suggestionsFor(assistState(new EditorStore(fixture())))).toContain('Add a title that says Hello');
-  });
-
-  it('shows the sign-in prompt when Puter AI is not available', () => {
-    const { ctx, a } = mount();
-    ctx.account = { onSignIn: vi.fn() };
-    a.open();
-    expect(a.el.querySelector('.assist-signin').hidden).toBe(false);
-    expect(a.el.textContent).toMatch(/Sign in to use the edit assistant/);
-    expect(a.el.querySelector('.assist-form').hidden).toBe(true);
-    a.el.querySelector('.assist-signin .btn.primary').click();
-    expect(ctx.account.onSignIn).toHaveBeenCalled();
-  });
-
-  it('performs a request, shows what was done and undoes it from the reply', async () => {
-    const chat = vi.fn(async () => toolReply(['set_speed', { clips: ['selected'], speed: 2 }]));
-    const { store, main, a } = mount({ chat });
-    const id = main().clips[0].id;
-    store.select(id);
-    a.launcher.click();
-    expect(a.isOpen).toBe(true);
-    expect(a.launcher.hidden).toBe(true);
-    const chips = [...a.el.querySelectorAll('.assist-chip')].map((c) => c.textContent);
-    expect(chips[0]).toBe('Speed up the selected clip 2x');
-    a.el.querySelector('.assist-chip').click();
-    await vi.waitFor(() => expect(a.el.querySelector('.assist-undo')).toBeTruthy());
-    expect(findClip(store.project, id).clip.speed).toBe(2);
-    expect(a.el.querySelector('.assist-msg.user').textContent).toBe('Speed up the selected clip 2x');
-    expect(a.el.querySelector('.assist-steps').textContent).toMatch(/2x speed/);
-    expect(chat.mock.calls[0][0][0].content).toContain(`Selected: ${id}`);
-    a.el.querySelector('.assist-undo').click();
-    expect(findClip(store.project, id).clip.speed).toBe(1);
-    expect(a.el.querySelector('.assist-undo').disabled).toBe(true);
-
-    // The follow-up carries the conversation, including the undo.
-    chat.mockResolvedValueOnce({ message: { content: 'Which clip should be red?' } }).mockResolvedValueOnce('{"actions":[],"reply":"Which clip should be red?"}');
-    const input = a.el.querySelector('.assist-input');
-    input.value = 'make it red instead';
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-    await vi.waitFor(() => expect(a.el.querySelectorAll('.assist-msg.bot:not(.thinking)')).toHaveLength(2));
-    const sent = chat.mock.calls[1][0];
-    expect(sent.map((m) => m.role)).toEqual(['system', 'user', 'assistant', 'user']);
-    expect(sent[2].content).toMatch(/2x speed .*undid this edit/);
-    expect(a.el.querySelectorAll('.assist-msg.bot')[1].textContent).toBe('Which clip should be red?');
-  });
-
-  it('shows a thinking state that can be cancelled', async () => {
-    let resolveChat;
-    const chat = vi.fn(() => new Promise((r) => (resolveChat = r)));
-    const { store, a } = mount({ chat });
-    a.open();
-    a.send('trim the first 2 seconds');
-    await vi.waitFor(() => expect(a.el.querySelector('.assist-msg.thinking')).toBeTruthy());
-    expect(a.busy).toBe(true);
-    expect(a.el.querySelector('.assist-send').getAttribute('aria-label')).toBe('Stop');
-    a.el.querySelector('.assist-msg.thinking .btn').click();
-    await vi.waitFor(() => expect(a.el.querySelector('.assist-msg.thinking')).toBe(null));
-    expect(a.el.querySelector('.assist-msg.bot').textContent).toBe('Stopped.');
-    resolveChat(toolReply(['remove_time_range', { start: 0, end: 2 }]));
-    await Promise.resolve();
-    expect(store.history.canUndo()).toBe(false);
-    expect(a.busy).toBe(false);
-  });
-
-  it('opens as a sheet on phones', () => {
-    const { ctx, a } = mount({ chat: vi.fn() });
-    ctx.mobile = { mode: 'phone' };
-    a.open();
-    expect(a.el.hidden).toBe(true);
-    expect(a.sheet.isOpen).toBe(true);
-    expect(a.sheet.body.querySelector('.assist-input')).toBeTruthy();
-    a.sheet.close();
-    expect(a.isOpen).toBe(false);
-    ctx.mobile.mode = 'desktop';
-    a.open();
-    expect(a.el.querySelector('.assist-input')).toBeTruthy();
-    expect(a.el.hidden).toBe(false);
-  });
-
+describe('edit assistant wording', () => {
   it('describes text style changes in a few words', () => {
     expect(styleWords({ sizeScale: 1.5, color: '#e5322d', bold: true, strokeColor: '#000000', strokeWidth: 6 })).toBe('bigger, color #e5322d, bold, outline');
-  });
-
-  it('closes with Escape and keeps typed keys away from the editor shortcuts', () => {
-    const { a } = mount({ chat: vi.fn() });
-    const seen = vi.fn();
-    document.addEventListener('keydown', seen);
-    a.open();
-    a.el.querySelector('.assist-chip').dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', bubbles: true }));
-    expect(seen).not.toHaveBeenCalled();
-    a.el.querySelector('.assist-input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    expect(a.isOpen).toBe(false);
-    expect(a.el.hidden).toBe(true);
-    document.removeEventListener('keydown', seen);
   });
 });

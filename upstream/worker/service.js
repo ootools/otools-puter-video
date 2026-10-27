@@ -9,7 +9,7 @@
  *   vsr:pub:<clientId>               { review, version } of a finished publish (retries)
  *   vsr:r:<rid>                      { id, title, projectId, owner, created, updated }
  *   vsr:r:<rid>:vseq                 version counter
- *   vsr:r:<rid>:v:<n>                { n, path, size, mime, width, height, fps, duration, range, title, created }
+ *   vsr:r:<rid>:v:<n>                { n, path, size, mime, width, height, fps, duration, range, timelineId?, title, created }
  *   vsr:r:<rid>:url:<n>              { url, expires } read link for version n's video
  *   vsr:r:<rid>:m:<uuid>             { uuid, username, role, joined, invite, removed? }
  *   vsr:r:<rid>:mseq / :mi:<n>       join order -> uuid (the member list)
@@ -71,7 +71,9 @@ export function validateVideo(video) {
     if (!(a >= 0 && b > a)) fail(400, 'Invalid range.');
     r = { in: a, out: b };
   }
-  return { path, mime, fps, duration, width, height, range: r };
+  // The editor timeline it was made from (optional: older apps don't send it).
+  const timelineId = typeof video.timelineId === 'string' && ID.test(video.timelineId) ? { timelineId: video.timelineId } : {};
+  return { path, mime, fps, duration, width, height, range: r, ...timelineId };
 }
 
 export class ReviewService {
@@ -136,13 +138,13 @@ export class ReviewService {
     return (await this.many(range(1, count).map((n) => `vsr:r:${rid}:v:${n}`))).filter(Boolean);
   }
 
-  /** What a member sees of a review. Paths stay with the worker; ranges only go to the owner. */
+  /** What a member sees of a review. Paths stay with the worker; ranges and timelines only go to the owner. */
   async view(rid, role, user, meta = null) {
     meta ||= await this.kv.get(`vsr:r:${rid}`);
     const owner = await this.owner();
     const versions = (await this.versions(rid)).map((v) => ({
       n: v.n, title: v.title, created: v.created, fps: v.fps, duration: v.duration, width: v.width, height: v.height, size: v.size, mime: v.mime,
-      ...(role === 'owner' ? { range: v.range } : {}),
+      ...(role === 'owner' ? { range: v.range, ...(v.timelineId ? { timelineId: v.timelineId } : {}) } : {}),
     }));
     return {
       id: rid, title: meta.title, created: meta.created, updated: meta.updated, owner: { username: owner.username },
@@ -238,31 +240,33 @@ export class ReviewService {
     if (!meta) fail(404, 'This review no longer exists.');
     const owner = await this.owner();
     if (user.uuid === owner.uuid) return { review: await this.view(rid, 'owner', user, meta) };
+    const existing = await this.kv.get(`vsr:r:${rid}:m:${user.uuid}`);
+    const validToken = typeof input.token === 'string' && TOKEN.test(input.token);
+    const tokenHash = validToken ? await hash(input.token) : null;
+    if (existing && !existing.removed) {
+      // A member is let in with any link, even the one they joined with after it
+      // expired or was turned off. A link never lowers a role; a working commenter link raises a viewer.
+      if (validToken && existing.role === 'viewer') {
+        const invite = await this.kv.get(`vsr:invite:${tokenHash}`);
+        if (invite?.review === rid && invite.role === 'commenter' && !invite.revoked && invite.expires > this.now()) {
+          const next = { ...existing, role: 'commenter', username: user.username };
+          await this.kv.set(`vsr:r:${rid}:m:${user.uuid}`, next);
+          return { review: await this.view(rid, next.role, user, meta) };
+        }
+      }
+      return { review: await this.view(rid, existing.role, user, meta) };
+    }
     const failKey = `vsr:joinfail:${user.uuid}:${Math.floor(this.now() / 600_000)}`;
     if (((await this.kv.get(failKey)) || 0) >= LIMITS.failedJoins) fail(429, 'Too many attempts with links that do not work. Try again in a few minutes.');
     const refuse = async (message) => {
       await this.bump(failKey, Infinity, 1200);
       fail(403, message);
     };
-    const existing = await this.kv.get(`vsr:r:${rid}:m:${user.uuid}`);
-    if (typeof input.token !== 'string' || !TOKEN.test(input.token)) {
-      if (existing && !existing.removed) return { review: await this.view(rid, existing.role, user, meta) };
-      return refuse('This invite link is not valid. Ask the owner for a new one.');
-    }
-    const tokenHash = await hash(input.token);
+    if (!validToken) return refuse('This invite link is not valid. Ask the owner for a new one.');
     const invite = await this.kv.get(`vsr:invite:${tokenHash}`);
     if (!invite || invite.review !== rid) return refuse('This invite link is not valid. Ask the owner for a new one.');
     if (invite.revoked) return refuse('This invite link was turned off. Ask the owner for a new one.');
     if (invite.expires <= this.now()) return refuse('This invite link has expired. Ask the owner for a new one.');
-    if (existing && !existing.removed) {
-      // A link never lowers a role; a commenter link raises a viewer.
-      if (existing.role === 'viewer' && invite.role === 'commenter') {
-        const next = { ...existing, role: 'commenter', username: user.username };
-        await this.kv.set(`vsr:r:${rid}:m:${user.uuid}`, next);
-        return { review: await this.view(rid, next.role, user, meta) };
-      }
-      return { review: await this.view(rid, existing.role, user, meta) };
-    }
     if (existing?.removed && invite.created <= existing.removed) fail(403, 'The owner removed you from this review. Ask them for a new link.');
     if (!existing) {
       const count = (await this.kv.get(`vsr:r:${rid}:mseq`)) || 0;

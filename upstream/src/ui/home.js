@@ -24,6 +24,8 @@ import { templateCard, templatesView, openTemplateDialog } from './home-template
 import { TemplatePreview } from './template-preview.js';
 
 const DAY = 24 * 60 * 60 * 1000;
+/** "a, b, c and 2 more" for toasts. */
+const fewNames = (list) => `${list.slice(0, 3).join(', ')}${list.length > 3 ? ` and ${list.length - 3} more` : ''}`;
 const QUICK_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '4:5', '21:9'];
 const VIEWS = [
   { id: 'home', label: 'Home', icon: () => icon('home', 18) },
@@ -94,6 +96,7 @@ export class Home {
     this.trash = [];
     this.loaded = false;
     this.coverUrls = new Map();
+    this.noCover = new Set(); // projects without a cover, so redraws (search) don't ask again
     this.view = viewFromHash();
     this.onHash = () => {
       const v = viewFromHash();
@@ -181,7 +184,7 @@ export class Home {
     this.installDrop(page);
     this.root.replaceChildren(page);
     this.root.removeAttribute('aria-busy');
-    installTooltips(page);
+    installTooltips();
     this.renderNav();
   }
 
@@ -249,9 +252,10 @@ export class Home {
     scriptCard.addEventListener('click', () => this.scriptToVideo());
     const ratios = QUICK_RATIOS.map((id) => {
       const r = RATIOS.find((x) => x.id === id);
-      const b = h('button.quick-card.ratio', { type: 'button', 'aria-label': `New ${r.label} project, ${r.hint}` },
+      const b = h('button.quick-card.ratio', { type: 'button', 'aria-label': `${r.label} ${r.hint}, new project` },
         h('span.quick-glyph', ratioGlyph(r.id, 22)),
-        h('span.quick-text', h('strong', r.label), h('span', r.hint)));
+        // The space keeps "16:9 YouTube" apart in the text the accessible name must start with.
+        h('span.quick-text', h('strong', r.label), ' ', h('span', r.hint)));
       b.addEventListener('click', () => this.onCreate({ ratio: r.id }));
       return b;
     });
@@ -325,7 +329,8 @@ export class Home {
   sorted() {
     const s = prefs().homeSort;
     const list = this.projects.filter((p) => !this.query || p.name.toLowerCase().includes(this.query));
-    if (s === 'name') return list.sort((a, b) => a.name.localeCompare(b.name));
+    // Natural order: Project 2 before Project 10, case and accents aside.
+    if (s === 'name') return list.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
     if (s === 'created') return list.sort((a, b) => (b.created || 0) - (a.created || 0));
     return list.sort((a, b) => b.modified - a.modified);
   }
@@ -383,8 +388,12 @@ export class Home {
   async loadCover(id, el) {
     let url = this.coverUrls.get(id);
     if (!url) {
+      if (this.noCover.has(id)) return;
       const blob = await this.library.coverBlob(id);
-      if (!blob) return;
+      if (!blob) {
+        this.noCover.add(id);
+        return;
+      }
       url = URL.createObjectURL(blob);
       this.coverUrls.set(id, url);
     }
@@ -566,7 +575,7 @@ export class Home {
       return;
     }
     pr.close();
-    if (res.missing.length) toast(`${res.missing.length} media file${res.missing.length === 1 ? ' was' : 's were'} missing and left out.`, { kind: 'error' });
+    if (res.missing.length) toast(`${res.missing.length} file${res.missing.length === 1 ? ' was' : 's were'} missing and left out: ${fewNames(res.missing)}`, { kind: 'error' });
     this.deliver(res);
   }
 
@@ -614,7 +623,7 @@ export class Home {
         });
         last = project;
         pr.close();
-        if (missing.length) toast(`${project.name}: ${missing.length} media file${missing.length === 1 ? ' is' : 's are'} not in the project file.`, { kind: 'error' });
+        if (missing.length) toast(`${project.name}: ${missing.length} file${missing.length === 1 ? ' is' : 's are'} not in the project file: ${fewNames(missing)}`, { kind: 'error' });
       } catch (err) {
         pr.close();
         toast(`${file.name}: ${err?.message || "Couldn't open this project file."}`, { kind: 'error' });

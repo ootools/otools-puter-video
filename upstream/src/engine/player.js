@@ -3,13 +3,13 @@
  * Renders on demand while paused and every animation frame while playing.
  */
 import { Emitter } from '../lib/emitter.js';
-import { US } from '../lib/time.js';
+import { US, frameStartAt } from '../lib/time.js';
 import { Compositor } from './compositor.js';
 import { MediaPool } from './media-pool.js';
 import { AudioGraph } from './audio-graph.js';
 import { TextCache } from './text.js';
 import { FrameSource } from './frame-source.js';
-import { evaluate, audibleClips, gainAt, upcomingVideoClips, trackAudible } from './scene.js';
+import { evaluate, audibleClips, gainAt, upcomingVideoClips } from './scene.js';
 import { sourceTimeAt } from '../model/timeline.js';
 import { hasCurve, speedAt } from '../model/speed-curve.js';
 import { framePosition, needsBetween, FRAME_SNAP } from '../model/slow-motion.js';
@@ -147,10 +147,11 @@ export class Player extends Emitter {
     const fit = Math.min(boxW / W, boxH / H);
     const cssW = Math.max(1, Math.floor(W * fit));
     const cssH = Math.max(1, Math.floor(H * fit));
-    // Render no larger than the project and at most ~2.2 MP so 4K projects stay smooth.
+    // Render at the size shown (Full: the project's own size), never larger
+    // than the project and at most ~2.2 MP so 4K projects stay smooth.
     let px = Math.min(1, (cssW * dpr) / W);
     if (this.quality === 'half') px *= 0.5;
-    else if (this.quality === 'full') px = Math.min(1, Math.max(px, (cssW * dpr) / W));
+    else if (this.quality === 'full') px = 1;
     const maxPx = 2_200_000;
     if (W * H * px * px > maxPx) px = Math.sqrt(maxPx / (W * H));
     this.renderScale = px;
@@ -201,15 +202,20 @@ export class Player extends Emitter {
     this.playing = true;
     this.clockStart = performance.now();
     this.timeStart = this.store.time;
+    this._holdClock();
     this.emit('play', { playing: true });
     this.invalidate();
   }
 
   pause() {
     if (!this.playing) return;
+    const end = this._stopAt();
     this.playing = false;
     this.playRange = false;
     this.pool.pauseAll();
+    // Stop at the start of the frame on screen, so the timecode shows that frame too. At the
+    // end it stays put, so Play starts over.
+    if (this.store.time < end - 1000) this.store.seek(frameStartAt(this.store.time, this.store.fps));
     this.emit('play', { playing: false });
     this.invalidate();
   }
@@ -219,15 +225,52 @@ export class Player extends Emitter {
     else this.play();
   }
 
+  /**
+   * Video elements take a few frames to start playing, and the first play
+   * can stall while the sound starts. For the first moments the clock waits
+   * whenever it gets a frame ahead of the video on screen (it never runs
+   * faster or goes back), so the picture and sound do not trail the playhead
+   * and the text drawn on it. Without video on screen the clock runs at once.
+   */
+  _holdClock() {
+    this._startWait = { until: performance.now() + 800, ref: null, synced: false, last: this.timeStart };
+  }
+
+  /** The clock time while it may be held (see _holdClock): null once it runs freely. */
+  _heldTime(now) {
+    const w = this._startWait;
+    if (!w) return null;
+    const ref = w.ref;
+    const el = ref?.entry.el;
+    if (now >= w.until || (w.synced && (!ref || el.paused))) {
+      this._startWait = null;
+      return null;
+    }
+    let t = this.timeStart + (now - this.clockStart) * 1000;
+    const moved = el && !el.seeking ? el.currentTime - ref.sec : NaN;
+    if (moved > -0.001 && moved < 1) {
+      const videoAt = ref.t + (Math.max(0, moved) * US) / ref.speed;
+      if (t > videoAt + US / this.store.fps / 2) {
+        t = Math.max(w.last, videoAt);
+        this.timeStart = t;
+        this.clockStart = now;
+      }
+    }
+    w.last = t;
+    return t;
+  }
+
   _tick() {
     this.raf = 0;
     if (this.playing) {
-      const t = this.timeStart + (performance.now() - this.clockStart) * 1000;
+      const now = performance.now();
+      const t = this._heldTime(now) ?? this.timeStart + (now - this.clockStart) * 1000;
       const end = this._stopAt();
       if (t >= end && this.loop && end - this._startAt() > 50_000) {
         // Loop: start over from the beginning (or the in point).
         this.timeStart = this._startAt();
         this.clockStart = performance.now();
+        this._holdClock();
         this.store.seek(this.timeStart);
       } else if (t >= end) {
         this.store.seek(end);
@@ -306,8 +349,6 @@ export class Player extends Emitter {
     const fps = project.settings.fps;
     pool.beginFrame();
     const map = new Map();
-    // Clips by id, including the virtual ones of compound and multi-camera clips that are not in the project.
-    const byId = new Map();
     const want = (layer) => {
       if (layer.kind === 'transition') {
         want(layer.from);
@@ -318,15 +359,19 @@ export class Player extends Emitter {
       const sec = layer.sourceTime / US;
       const entry = pool.claim(layer.clip, this.previewAsset(layer.asset), 'video', sec);
       map.set(layer.clip.id, entry);
-      byId.set(layer.clip.id, layer.clip);
-      this._drive(entry, layer.clip, sec, fps, true, t);
+      this._drive(entry, layer.clip, sec, fps, true, t, layer.held);
+      // The clock starts with the first element that plays at a steady speed.
+      const w = this._startWait;
+      if (w && !w.ref && this.playing && !entry.el.paused && !layer.held && !layer.clip.freeze && !hasCurve(layer.clip)) w.ref = { entry, sec, t, speed: Math.min(16, Math.max(0.0625, layer.clip.speed || 1)) };
     };
     for (const l of layers) want(l);
     // Sound: audio clips (and video clips whose picture is hidden) still play.
+    const heard = new Set();
     for (const { clip, track } of audibleClips(project)) {
       if (t < clip.start || t >= clip.start + clip.duration) continue;
       const asset = this.previewAsset(project.assets[clip.assetId]);
       if (!asset) continue;
+      heard.add(clip.id);
       let entry = map.get(clip.id);
       const sec = sourceTimeAt(clip, t) / US;
       if (!entry) {
@@ -340,11 +385,9 @@ export class Player extends Emitter {
         entry.gain.gain.setTargetAtTime(g, pool.audioCtx.currentTime, 0.015);
       }
     }
-    // Silence picture-only elements (detached or muted audio).
-    for (const [id, entry] of map) {
-      const clip = entry.clipId === id ? byId.get(id) || this._clipById(id) : null;
-      if (entry.gain && clip && (clip.audioDetached || clip.muted || clip.disabled || clip.freeze || !project.assets[clip.assetId]?.hasAudio || this._trackMuted(id))) entry.gain.gain.value = 0;
-    }
+    // Silence picture-only elements: detached or muted sound, and clips drawn
+    // past their cut in a transition (the export cuts their sound there too).
+    for (const [id, entry] of map) if (entry.gain && !heard.has(id)) entry.gain.gain.value = 0;
     // Warm up clips about to start so the first frame is ready.
     if (this.playing) {
       for (const c of upcomingVideoClips(project, t, 1.5 * US)) {
@@ -357,28 +400,19 @@ export class Player extends Emitter {
       }
     }
     pool.endFrame();
+    if (this._startWait && this.playing) this._startWait.synced = true;
     return map;
   }
 
-  _clipById(id) {
-    for (const t of this.store.project.tracks) for (const c of t.clips) if (c.id === id) return c;
-    return null;
-  }
-
-  /** Muted, or silenced because another track is soloed. */
-  _trackMuted(id) {
-    const project = this.store.project;
-    for (const t of project.tracks) if (t.clips.some((c) => c.id === id)) return !trackAudible(project, t);
-    return false;
-  }
-
-  _drive(entry, clip, sec, fps, visual, t = this.time) {
+  /** held: the picture stays on one frame (a transition past the media's start or end), like a freeze frame. */
+  _drive(entry, clip, sec, fps, visual, t = this.time, held = false) {
     const el = entry.el;
-    if (this.playing && !clip.freeze && hasCurve(clip)) {
+    const still = clip.freeze || held;
+    if (this.playing && !still && hasCurve(clip)) {
       this._driveCurve(entry, clip, sec, t);
       return;
     }
-    if (this.playing && !clip.freeze) {
+    if (this.playing && !still) {
       const rate = Math.min(16, Math.max(0.0625, clip.speed || 1));
       if (el.playbackRate !== rate) el.playbackRate = rate;
       // Keep the pitch on speed changes unless the clip asks otherwise (the export matches).
@@ -395,7 +429,8 @@ export class Player extends Emitter {
     } else {
       if (!el.paused) el.pause();
       if (entry.gain) entry.gain.gain.value = 0;
-      const tol = visual ? 0.5 / fps : 0.05;
+      // Paused, show the frame at sec itself (as the timecode and the export do), not one up to half a frame off.
+      const tol = visual ? (this.playing ? 0.5 / fps : 0.001) : 0.05;
       if (Math.abs(el.currentTime - sec) > tol || el.readyState < 2) {
         if (Math.abs(el.currentTime - sec) > tol) this.pool.seek(entry, sec);
       }
@@ -436,6 +471,7 @@ export class Player extends Emitter {
     const layers = evaluate(project, t);
     this._frameElements = this._syncMedia(t, layers);
     this.compositor.render(layers, { settings: project.settings, time: t / US });
+    this.text.sweep();
     this.lastLayers = layers;
     this.emit('frame', { time: t });
   }
@@ -476,19 +512,6 @@ export class Player extends Emitter {
       info = { width: a?.width || layer.width, height: a?.height || layer.height };
     }
     return this.compositor.layerBox(layer, info);
-  }
-
-  /** Current frame as a JPEG blob (project covers). */
-  async snapshot(maxW = 480) {
-    if (!this.compositor) return null;
-    this.renderFrame(this.time);
-    const src = this.canvas;
-    const scale = Math.min(1, maxW / src.width);
-    const c = document.createElement('canvas');
-    c.width = Math.round(src.width * scale);
-    c.height = Math.round(src.height * scale);
-    c.getContext('2d').drawImage(src, 0, 0, c.width, c.height);
-    return new Promise((resolve) => c.toBlob(resolve, 'image/jpeg', 0.82));
   }
 
   dispose() {

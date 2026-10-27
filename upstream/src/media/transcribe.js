@@ -213,10 +213,17 @@ function parseTime(s) {
   return Number(hh || 0) * 3600 + Number(mm) * 60 + Number(ss) + Number(frac.padEnd(3, '0')) / 1000;
 }
 
+// Tags in cues: SubRip and WebVTT formatting, HTML left over from converted files
+// (<span style=...>, <p>), and WebVTT karaoke timestamps. A tag starts with a letter
+// right after "<", so "if a < b and c > d" stays text.
+const CUE_TAG = /<\/?[a-z][\w.-]*(?:\s[^<>]*)?\/?>|<(?:\d+:)?\d{1,2}:\d{2}[.,]\d{1,3}>/gi;
+const CUE_BREAK = /<br\s*\/?>/gi;
+
 function cleanCueText(lines) {
   return lines
     .join('\n')
-    .replace(/<[^>]*>/g, '')
+    .replace(CUE_BREAK, '\n')
+    .replace(CUE_TAG, '')
     .replace(/\{\\[^}]*\}/g, '')
     .replace(/&nbsp;/g, ' ')
     .replace(/&lt;/g, '<')
@@ -259,7 +266,8 @@ function srtTime(sec) {
 export function toSrt(cues) {
   return cues
     .filter((c) => String(c.text).trim())
-    .map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(c.end)}\n${String(c.text).trim()}\n`)
+    // A blank line ends a cue in SubRip, so blank lines inside the text are dropped.
+    .map((c, i) => `${i + 1}\n${srtTime(c.start)} --> ${srtTime(c.end)}\n${String(c.text).trim().replace(/\n\s*\n/g, '\n')}\n`)
     .join('\n');
 }
 
@@ -281,7 +289,16 @@ export function lineCharsFor(preset, width) {
  */
 export function buildCaptionClips(cues, { presetId = 'subtitle', position = 'bottom', lineChars = 0, offset = 0 } = {}) {
   const preset = TEXT_PRESETS.find((p) => p.id === presetId) || TEXT_PRESETS.find((p) => p.id === 'subtitle');
-  const sorted = [...cues].filter((c) => String(c.text).trim()).sort((a, b) => a.start - b.start);
+  const wrap = (t) => (lineChars ? wrapCaption(t, lineChars) : String(t).trim());
+  // Cues that start together (two speakers in a subtitle file) share one caption, one under the other.
+  const sorted = [];
+  for (const c of [...cues].filter((x) => String(x.text).trim()).sort((a, b) => a.start - b.start)) {
+    const last = sorted.at(-1);
+    if (last && (c.start - last.start) * US < MIN_CLIP) {
+      last.end = Math.max(last.end, c.end);
+      last.text += `\n${wrap(c.text)}`;
+    } else sorted.push({ start: c.start, end: c.end, text: wrap(c.text) });
+  }
   const clips = [];
   let prevEnd = 0;
   for (let i = 0; i < sorted.length; i++) {
@@ -292,11 +309,10 @@ export function buildCaptionClips(cues, { presetId = 'subtitle', position = 'bot
     let end = Math.max(Math.round((c.end + offset) * US), start + 400_000);
     end = Math.min(end, Math.max(nextStart, start + MIN_CLIP));
     if (end - start < MIN_CLIP) continue;
-    const text = lineChars ? wrapCaption(c.text, lineChars) : String(c.text).trim();
     const clip = makeClip('text', {
       start,
       duration: end - start,
-      text,
+      text: c.text,
       style: { ...DEFAULT_TEXT_STYLE, ...preset.style },
       preset: preset.id,
       caption: true,
@@ -311,7 +327,16 @@ export function buildCaptionClips(cues, { presetId = 'subtitle', position = 'bot
 /** Cues (seconds) for the caption clips in a project, in time order. */
 export function captionCues(project) {
   const out = [];
-  for (const t of project.tracks) for (const c of t.clips) if (c.type === 'text' && c.caption) out.push({ start: c.start / US, end: clipEnd(c) / US, text: c.text });
+  // An export slice (model/slice.js) keeps captions that cross its edges whole; cut them there.
+  const stop = project.end ?? Infinity;
+  for (const t of project.tracks) {
+    for (const c of t.clips) {
+      if (c.type !== 'text' || !c.caption) continue;
+      const start = Math.max(0, c.start);
+      const end = Math.min(clipEnd(c), stop);
+      if (end > start) out.push({ start: start / US, end: end / US, text: c.text });
+    }
+  }
   return out.sort((a, b) => a.start - b.start);
 }
 
@@ -464,8 +489,9 @@ function normalizeWords(result) {
 
 /**
  * Timed words for one piece of mono audio. Tries xAI (per-word timestamps)
- * and falls back to the default model, whose segments (or plain text) are
- * spread over the stretches of sound.
+ * and, only when that fails, the default model, whose segments (or plain
+ * text) are spread over the stretches of sound. An answer with no words
+ * (silence, music) is final: asking again would only pay twice.
  */
 export async function transcribePiece(samples, sampleRate, { language = 'auto', testMode = false, signal } = {}) {
   const file = new File([encodeWav([samples], sampleRate)], 'captions.wav', { type: 'audio/wav' });
@@ -479,7 +505,8 @@ export async function transcribePiece(samples, sampleRate, { language = 'auto', 
     if (signal?.aborted) throw abortError();
     const words = normalizeWords(res);
     if (words.length) return words;
-    if (res?.text) return distributeText(res.text, regionsOrAll(samples, sampleRate));
+    const text = typeof res === 'string' ? res : res?.text;
+    return text ? distributeText(text, regionsOrAll(samples, sampleRate)) : [];
   } catch (err) {
     if (err?.name === 'AbortError') throw err;
     firstError = err;

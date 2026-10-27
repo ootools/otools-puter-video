@@ -183,7 +183,8 @@ export function enhanceSection(view) {
     get: () => Math.round(view.clip?.enhance ? view.valueOf('enhance.strength') : EXTRA_DEFAULTS.enhance.strength),
     set: (v, final) => {
       if (!view.clip?.enhance) setExtra(view, 'enhance', 'Enhance quality', 'strength', v, final);
-      else view.animate('enhance.strength', v, { label: 'Enhance quality', final });
+      // Same undo key as setExtra: a drag that turns the section on stays one step.
+      else view.animate('enhance.strength', v, { label: 'Enhance quality', final, key: 'enhance-strength' });
     },
   });
   const small = h('p.insp-note.enhance-small', { hidden: true }, icon('info', 14), h('span'));
@@ -214,13 +215,14 @@ function relightSlider(view, field, opts) {
     get: () => Math.round(view.clip?.relight ? view.valueOf(prop) : EXTRA_DEFAULTS.relight[field]),
     set: (v, final) => {
       if (!view.clip?.relight) setExtra(view, 'relight', 'Relight', field, v, final);
-      else view.animate(prop, v, { label: 'Relight', final });
+      // Same undo key as setExtra: a drag that turns the section on stays one step.
+      else view.animate(prop, v, { label: 'Relight', final, key: `relight-${field}` });
     },
   });
 }
 
 export function relightSection(view) {
-  const angle = relightSlider(view, 'angle', { label: 'Light from', min: -180, max: 180, unit: '°', className: 'centered' });
+  const angle = relightSlider(view, 'angle', { label: 'Light from', min: -180, max: 180, hardMin: -360, hardMax: 360, unit: '°', className: 'centered' });
   const intensity = relightSlider(view, 'intensity', { label: 'Intensity', min: 0, max: 100 });
   const temp = slider(view, {
     label: 'Temperature', min: -100, max: 100, className: 'centered track-temp',
@@ -240,7 +242,7 @@ export function canvasSection(view) {
   const c1 = color(view, { label: 'Color', get: extraValue('canvas', 'color'), set: (v, final) => setExtra(view, 'canvas', 'Canvas color', 'color', v, final) });
   const c2 = color(view, { label: 'Second color', get: extraValue('canvas', 'color2'), set: (v, final) => setExtra(view, 'canvas', 'Canvas color', 'color2', v, final) });
   const angle = slider(view, {
-    label: 'Angle', min: 0, max: 360, unit: '°',
+    label: 'Angle', min: 0, max: 360, hardMin: -360, hardMax: 360, unit: '°',
     get: (c) => Math.round(extraValue('canvas', 'angle')(c)),
     set: (v, final) => setExtra(view, 'canvas', 'Canvas gradient', 'angle', v, final),
   });

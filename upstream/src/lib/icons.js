@@ -22,6 +22,9 @@ import {
   SquareUserRound, Paintbrush,
 } from 'lucide';
 import {
+  Paperclip, SquarePen, PanelRightClose, PanelRightOpen, Ban, Minus,
+} from 'lucide';
+import {
   Heart, Hexagon, PenTool, Brush, Eraser, SquaresUnite, SquaresSubtract, SquaresIntersect, CopyPlus, AlignStartVertical, AlignCenterVertical, AlignEndVertical, AlignStartHorizontal, AlignCenterHorizontal, AlignEndHorizontal,
 } from 'lucide';
 
@@ -197,6 +200,9 @@ Object.assign(ICONS, {
 
 // Presenter avatars and style looks.
 Object.assign(ICONS, { avatar: SquareUserRound, stylize: Paintbrush });
+
+// The AI sidebar.
+Object.assign(ICONS, { attach: Paperclip, newChat: SquarePen, panelRightClose: PanelRightClose, panelRightOpen: PanelRightOpen, declined: Ban, minus: Minus });
 
 /** An SVG icon element. Icons are decorative (aria-hidden); label the control instead. */
 export function icon(name, size = 16, extraClass = '') {

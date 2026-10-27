@@ -1,9 +1,12 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { EditorStore } from '../src/model/store.js';
 import { createActions } from '../src/ui/actions.js';
 import { mainTrack, findClip, allClips } from '../src/model/timeline.js';
 import { TEXT_PRESETS } from '../src/model/catalog.js';
 import { fixture, clip, onMain, spans, kinds, trackOf, s } from './helpers.js';
+import { createCompound } from '../src/model/compound.js';
+
+vi.mock('../src/media/reverse.js', () => ({ reverseFile: async () => new File(['x'], 'clip (reversed).mp4', { type: 'video/mp4' }) }));
 
 /** A real store and the shared actions, with no player or library behind them. */
 function setup(...mainClips) {
@@ -73,6 +76,15 @@ describe('split, delete and trim actions', () => {
     expect(store.time).toBe(s(2));
   });
 
+  it('moves the playhead to the kept part after Q with nothing selected too', () => {
+    const { store, actions, main } = setup(clip('video', 0, 2), clip('video', 2, 4));
+    store.seek(s(3));
+    store.clearSelection();
+    actions.deleteLeft();
+    expect(spans(main())).toEqual([[0, 2], [2, 3]]);
+    expect(store.time).toBe(s(2));
+  });
+
   it('deletes right of the playhead on the base clip under it', () => {
     const { store, actions, main } = setup(clip('video', 0, 4));
     store.seek(s(1));
@@ -91,6 +103,46 @@ describe('clipboard actions', () => {
     expect(store.selectedIds).toHaveLength(1);
     expect(store.selectedIds[0]).toBe(main().clips[1].id);
     expect(main().clips[1].assetId).toBe(a.assetId);
+  });
+
+  it('duplicates several clips onto the tracks they came from', () => {
+    const { store, actions, main } = setup(clip('video', 0, 5), clip('video', 5, 5));
+    store.update('Nest', (p) => void createCompound(p, [mainTrack(p).clips[0].id], { ripple: true }));
+    const comp = main().clips[0];
+    const title = actions.addText('plain', { start: s(1), duration: s(2) });
+    store.select([comp.id, title.id]);
+    actions.duplicate();
+    const copy = store.selectedIds.map((id) => findClip(store.project, id)).find((f) => f.clip.type === 'compound');
+    expect(copy.track.main).toBe(true);
+    // Titles on two stacked text tracks keep their tracks, so the one on top stays on top.
+    const textTrack = (id, text) => ({ id, kind: 'text', main: false, locked: false, hidden: false, muted: false, clips: [clip('text', 20, 2, { text })] });
+    store.update('Tracks', (p) => void p.tracks.unshift(textTrack('up', 'TOP'), textTrack('low', 'BOTTOM')));
+    const [top, bottom] = ['up', 'low'].map((id) => store.project.tracks.find((t) => t.id === id).clips[0]);
+    store.select([bottom.id, top.id]);
+    actions.duplicate();
+    const made = store.selectedIds.map((id) => findClip(store.project, id));
+    expect(made.map((f) => [f.clip.text, f.track.id]).sort()).toEqual([['BOTTOM', 'low'], ['TOP', 'up']]);
+  });
+
+  it('duplicates a group (base clip and its title) as a new group after it', () => {
+    const { store, actions, main } = setup(clip('video', 0, 5), clip('video', 5, 5));
+    const t = actions.addText('plain', { start: s(1), duration: s(2) });
+    const [a] = main().clips;
+    store.select([a.id, t.id]);
+    actions.group();
+    actions.duplicate();
+    const made = store.selectedIds.map((id) => findClip(store.project, id).clip);
+    const v = made.find((c) => c.type === 'video');
+    const tx = made.find((c) => c.type === 'text');
+    expect(v.start).toBe(s(5));
+    expect(tx.start).toBe(s(6));
+    expect(v.group).toBeTruthy();
+    expect(tx.group).toBe(v.group);
+    expect(v.group).not.toBe(a.group);
+    expect(spans(main())).toEqual([[0, 5], [5, 5], [10, 5]]);
+    expect(findClip(store.project, t.id).clip.start).toBe(s(1));
+    store.undo();
+    expect(main().clips).toHaveLength(2);
   });
 
   it('copies and pastes at the playhead, keeping base-track clips on the base track', () => {
@@ -123,6 +175,18 @@ describe('clipboard actions', () => {
     actions.paste();
     actions.duplicate();
     expect(store.history.canUndo()).toBe(false);
+  });
+});
+
+describe('compound clip actions', () => {
+  it('explains why base track clips with a gap between them are not nested', () => {
+    const { store, actions, main } = setup(clip('video', 0, 2), clip('video', 2, 3), clip('video', 5, 2));
+    const [a, , c] = main().clips;
+    store.select([a.id, c.id]);
+    expect(actions.createCompound()).toBeNull();
+    expect(toasts().some((t) => t.includes('next to each other'))).toBe(true);
+    expect(store.history.canUndo()).toBe(false);
+    expect(spans(main())).toEqual([[0, 2], [2, 3], [5, 2]]);
   });
 });
 
@@ -310,5 +374,45 @@ describe('keyframes', () => {
     actions.toggleKeyframe(main().clips[0].id, 'x');
     expect(main().clips[0].keyframes).toEqual({});
     expect(toasts().join()).toMatch(/Move the playhead over the clip/);
+  });
+});
+
+describe('importing files', () => {
+  it('names the file in an import error that does not', async () => {
+    const { store } = setup();
+    const library = {
+      importFile: async (file) => {
+        if (file.name === 'odd.mkv') throw new Error('This file type is not supported by your browser.');
+        throw new Error(`${file.name} is not a video, audio or image file.`);
+      },
+    };
+    const ctx = { store, player: null, library };
+    ctx.actions = createActions(ctx);
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      expect(await ctx.actions.importFiles([new File(['x'], 'odd.mkv'), new File(['y'], 'notes.txt')])).toEqual([]);
+    } finally {
+      console.error = quiet;
+    }
+    expect(toasts()).toEqual(['odd.mkv: This file type is not supported by your browser.', 'notes.txt is not a video, audio or image file.']);
+  });
+});
+
+describe('reverse', () => {
+  it('closes the progress dialog when the reversed file cannot be saved', async () => {
+    const p = fixture();
+    const [a] = onMain(p, clip('video', 0, 4));
+    const store = new EditorStore(p);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const library = { mediaBlob: async () => new Blob(['v']), importFile: async () => { throw new Error('Your Puter storage is full.'); } };
+    const ctx = { store, player: null, library };
+    ctx.actions = createActions(ctx);
+    await ctx.actions.reverseClip(a.id);
+    expect(document.querySelectorAll('dialog')).toHaveLength(0);
+    expect([...document.querySelectorAll('.toast')].map((t) => t.textContent).join()).toMatch(/storage is full/);
+    expect(findClip(store.project, a.id).clip.reversed).toBeFalsy();
+    err.mockRestore();
+    document.body.replaceChildren();
   });
 });

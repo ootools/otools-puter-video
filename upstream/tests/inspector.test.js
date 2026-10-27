@@ -7,6 +7,7 @@ import { gainToDb, dbToGain } from '../src/ui/inspector/audio.js';
 import { speedToPos, posToSpeed } from '../src/ui/inspector/speed.js';
 import * as T from '../src/model/timeline.js';
 import { US } from '../src/lib/time.js';
+import { closeMenus } from '../src/ui/menu.js';
 
 // jsdom has no canvas; previews fall back to blank tiles.
 HTMLCanvasElement.prototype.getContext = () => null;
@@ -123,6 +124,50 @@ describe('inspector layout', () => {
   });
 });
 
+describe('top tabs that do not fit', () => {
+  afterEach(() => closeMenus());
+
+  /** Fake layout: the tab row is rowW wide and each tab 50 px (jsdom has no layout). */
+  function layout(rowW) {
+    const bar = env.el.querySelector('.insp-tabs-bar');
+    Object.defineProperty(bar, 'clientWidth', { configurable: true, get: () => rowW });
+    for (const b of env.el.querySelectorAll('.top-tabs .insp-tab, .insp-tabs-more')) b.getBoundingClientRect = () => ({ width: 50, height: 30 });
+    env.insp.relayout();
+  }
+  const shown = () => [...env.el.querySelectorAll('.top-tabs [role=tab]')].filter((t) => !t.hidden).map((t) => t.textContent);
+  const more = () => env.el.querySelector('.insp-tabs-more');
+
+  it('go into a More menu, and a tab picked there joins the row', () => {
+    env.store.select(env.v1.id);
+    layout(1000);
+    expect(shown()).toEqual(['Video', 'Audio', 'Speed', 'Animation', 'Effects', 'Style', 'Color']);
+    expect(more().hidden).toBe(true);
+    layout(260);
+    expect(shown()).toEqual(['Video', 'Audio', 'Speed', 'Animation']);
+    expect(more().hidden).toBe(false);
+    expect(more().getAttribute('aria-haspopup')).toBe('menu');
+    more().click();
+    const items = [...document.querySelectorAll('.menu [role^=menuitem]')];
+    expect(items.map((i) => i.textContent)).toEqual(['Effects', 'Style', 'Color']);
+    items.at(-1).click();
+    expect(shown()).toEqual(['Video', 'Audio', 'Speed', 'Color']);
+    expect(tab('Color').getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(tab('Color'));
+    expect(field('Exposure')).toBeTruthy();
+    // Arrow keys move between the tabs on show.
+    tab('Color').dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    expect(document.activeElement).toBe(tab('Video'));
+  });
+
+  it('keeps a tab opened from elsewhere in the row', () => {
+    env.store.select(env.v1.id);
+    layout(260);
+    env.insp.showTab('stylize');
+    expect(shown()).toContain('Style');
+    expect(tab('Style').getAttribute('aria-selected')).toBe('true');
+  });
+});
+
 describe('video basic', () => {
   beforeEach(() => env.store.select(env.v1.id));
 
@@ -199,6 +244,27 @@ describe('video basic', () => {
     expect(env.store.time).toBe(1 * US);
     scaleField.querySelector('[aria-label="Next Scale keyframe"]').click();
     expect(env.store.time).toBe(3 * US);
+  });
+
+  it('a keyframed value does not change with the playhead off the clip', () => {
+    env.store.seek(1 * US);
+    field('Scale').querySelector('.kf-btn').click();
+    env.store.seek(3 * US);
+    drag(range('Scale'), [200]);
+    env.store.seek(8 * US);
+    expect(range('Scale').value).toBe('200');
+    const undo = env.store.history.undoStack.length;
+    const before = JSON.stringify(clip(env.v1.id));
+    range('Scale').focus();
+    drag(range('Scale'), [250, 300]);
+    expect(JSON.stringify(clip(env.v1.id))).toBe(before);
+    expect(env.store.history.undoStack.length).toBe(undo);
+    // The slider goes back to the value shown and a note says why.
+    expect(range('Scale').value).toBe('200');
+    expect(field('Scale').querySelector('.num-input').value).toBe('200');
+    const notes = [...document.querySelectorAll('.toast')].filter((t) => t.textContent.includes('Move the playhead over the clip'));
+    expect(notes).toHaveLength(1);
+    notes.forEach((t) => t.remove());
   });
 
   it('applied filter shows intensity and can be removed', () => {
@@ -343,6 +409,23 @@ describe('audio and speed', () => {
     preset.click();
     expect(clip(env.aud.id).speed).toBe(0.5);
     expect(preset.getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('a speed drag that dips and comes back keeps a clip held by its neighbor', () => {
+    env.store.toggles.ripple = false;
+    env.store.select(env.v1.id);
+    tab('Speed').click();
+    const r = env.el.querySelector('.speed-field input[type=range]');
+    drag(r, [speedToPos(0.7), speedToPos(0.5), speedToPos(0.7), speedToPos(1)]);
+    expect(clip(env.v1.id).speed).toBe(1);
+    expect(clip(env.v1.id).duration).toBe(5 * US);
+    // The neighbor still limits a slower clip.
+    drag(r, [speedToPos(0.5)]);
+    expect(clip(env.v1.id).duration).toBe(5 * US);
+    expect(clip(env.v1.id).speed).toBe(0.5);
+    // A new drag starts from what the clip now shows (2.5 s of footage).
+    drag(r, [speedToPos(1)]);
+    expect(clip(env.v1.id).duration).toBe(2.5 * US);
   });
 });
 
@@ -498,6 +581,17 @@ describe('video basic extras', () => {
     expect(clip(env.v1.id).transform.x).toBe(0);
   });
 
+  it('a first enhance or relight drag is one undo step', () => {
+    const section = (title) => [...env.el.querySelectorAll('.extra-section')].find((x) => x.querySelector('.section-title').textContent === title);
+    for (const [title, label] of [['Enhance quality', 'Strength'], ['Relight', 'Intensity'], ['Relight', 'Light from']]) {
+      const before = env.store.history.undoStack.length;
+      drag(field(label, section(title)).querySelector('input[type=range]'), [10, 20, 30]);
+      expect(env.store.history.undoStack.length).toBe(before + 1);
+    }
+    expect(clip(env.v1.id).enhance.strength).toBe(30);
+    expect(clip(env.v1.id).relight).toMatchObject({ intensity: 30, angle: 30 });
+  });
+
   it('turns picture sections on and applies the canvas to all clips', () => {
     env.el.querySelector('[aria-label="Apply motion blur"]').click();
     expect(clip(env.v1.id).motionBlur).toEqual({ on: true, amount: 50 });
@@ -514,5 +608,227 @@ describe('video basic extras', () => {
     [...env.el.querySelectorAll('button')].find((b) => b.textContent === 'Apply to all').click();
     expect(clip(env.v2.id).canvas).toMatchObject({ on: true, type: 'gradient' });
     expect(clip(env.img.id).canvas).toMatchObject({ on: true, type: 'gradient' });
+  });
+});
+
+describe('number boxes', () => {
+  /** Type into a slider's number box and press Enter, keeping focus there. */
+  function typeEnter(label, v) {
+    const num = field(label).querySelector('.num-input');
+    num.focus();
+    num.value = String(v);
+    num.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    return num;
+  }
+  const arrow = (num, key) => num.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+
+  it('limits typed values to the slider range and shows what was stored', () => {
+    env.store.select(env.v1.id);
+    tab('Color').click();
+    let num = typeEnter('Exposure', 300);
+    expect(clip(env.v1.id).adjust.exposure).toBe(100);
+    expect(num.value).toBe('100');
+    typeEnter('Exposure', -1e9);
+    expect(clip(env.v1.id).adjust.exposure).toBe(-100);
+    tab('Video').click();
+    num = typeEnter('Opacity', 500);
+    expect(clip(env.v1.id).opacity).toBe(1);
+    expect(num.value).toBe('100');
+    num.blur();
+    expect(num.value).toBe('100');
+    typeEnter('Opacity', -50);
+    expect(clip(env.v1.id).opacity).toBe(0);
+  });
+
+  it('shows the stored value when the clip limits what was typed', () => {
+    env.store.select(env.aud.id);
+    const num = typeEnter('Volume', 100);
+    expect(clip(env.aud.id).volume).toBe(10);
+    expect(num.value).toBe('20.0');
+  });
+
+  it('keeps animation durations positive', () => {
+    env.store.select(env.v1.id);
+    env.ctx.actions.applyAnimation('in', 'fade-in', 500_000);
+    tab('Animation').click();
+    typeEnter('Duration', -3);
+    expect(clip(env.v1.id).animIn.duration).toBe(0.1 * US);
+  });
+
+  it('still takes values past the slider where the clip allows them', () => {
+    env.store.select(env.v1.id);
+    typeEnter('Scale', 1000);
+    expect(clip(env.v1.id).transform.scale).toBe(10);
+    typeEnter('Rotate', 720);
+    expect(clip(env.v1.id).transform.rotation).toBe(720);
+    env.store.select(env.text.id);
+    env.el.querySelectorAll('.section-toggle[aria-expanded=false]').forEach((b) => b.click());
+    typeEnter('Size', 500);
+    expect(clip(env.text.id).style.size).toBe(500);
+  });
+
+  it('takes fades longer than the slider on a long clip', () => {
+    env.store.update('Longer', (p) => {
+      T.findClip(p, env.aud.id).clip.duration = 30 * US;
+    }, { structural: false });
+    env.store.select(env.aud.id);
+    typeEnter('Fade out', 25);
+    expect(clip(env.aud.id).fadeOut).toBe(25 * US);
+    // Still no longer than the clip leaves room for.
+    typeEnter('Fade in', 25);
+    expect(clip(env.aud.id).fadeIn).toBe(5 * US);
+  });
+
+  it('limits multi-selection values to the range', () => {
+    env.store.select([env.v1.id, env.img.id]);
+    const num = typeEnter('Opacity', 500);
+    expect(clip(env.v1.id).opacity).toBe(1);
+    expect(clip(env.img.id).opacity).toBe(1);
+    expect(num.value).toBe('100');
+    typeEnter('Opacity', -50);
+    expect(clip(env.v1.id).opacity).toBe(0);
+  });
+
+  it('shows the speed that was set', () => {
+    env.store.select(env.v1.id);
+    tab('Speed').click();
+    const num = env.el.querySelector('[aria-label="Speed value"]');
+    num.focus();
+    num.value = '1e3';
+    num.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(clip(env.v1.id).speed).toBe(100);
+    expect(num.value).toBe('100');
+  });
+
+  it('unchanged values and resets at the defaults add no undo steps', () => {
+    env.store.select(env.v1.id);
+    const steps = () => env.store.history.undoStack.length;
+    const before = steps();
+    const num = field('Opacity').querySelector('.num-input');
+    num.focus();
+    for (let i = 0; i < 3; i++) arrow(num, 'ArrowUp');
+    typeEnter('Opacity', 100);
+    typeEnter('Scale', 100);
+    env.el.querySelector('[aria-label="Reset Transform"]').click();
+    env.el.querySelector('[aria-label="Reset Blend"]').click();
+    env.el.querySelector('[aria-label="Reset Crop"]').click();
+    expect(steps()).toBe(before);
+    expect(num.value).toBe('100');
+    // A real change still is one.
+    typeEnter('Opacity', 50);
+    expect(steps()).toBe(before + 1);
+    env.el.querySelector('[aria-label="Reset Blend"]').click();
+    expect(steps()).toBe(before + 2);
+    expect(clip(env.v1.id).opacity).toBe(1);
+  });
+
+  it('typing the value shown still applies it where that changes something', () => {
+    env.store.update('Opacity', (p) => {
+      T.findClip(p, env.v1.id).clip.opacity = 0.5;
+      T.findClip(p, env.img.id).clip.opacity = 0.8;
+    }, { structural: false });
+    // Several clips: the box shows the first one's value.
+    env.store.select([env.v1.id, env.img.id]);
+    expect(field('Opacity').querySelector('.num-input').value).toBe('50');
+    typeEnter('Opacity', 50);
+    expect(clip(env.img.id).opacity).toBe(0.5);
+    // Between keys: typing the value shown adds a key there.
+    env.store.update('Keys', (p) => {
+      T.findClip(p, env.v1.id).clip.keyframes = { opacity: [{ t: 0, v: 0, ease: 'linear' }, { t: 2 * US, v: 1, ease: 'linear' }] };
+    }, { structural: false });
+    env.store.select(env.v1.id);
+    env.store.seek(1 * US);
+    expect(field('Opacity').querySelector('.num-input').value).toBe('50');
+    typeEnter('Opacity', 50);
+    expect(clip(env.v1.id).keyframes.opacity).toHaveLength(3);
+    // On that key now, the same value again is no edit.
+    const steps = env.store.history.undoStack.length;
+    typeEnter('Opacity', 50);
+    expect(env.store.history.undoStack.length).toBe(steps);
+  });
+
+  it('arrow keys keep values typed past the slider', () => {
+    env.store.select(env.v1.id);
+    const num = typeEnter('Scale', 1000);
+    arrow(num, 'ArrowUp');
+    expect(clip(env.v1.id).transform.scale).toBeCloseTo(10.01);
+    typeEnter('Rotate', 720);
+    arrow(field('Rotate').querySelector('.num-input'), 'ArrowDown');
+    expect(clip(env.v1.id).transform.rotation).toBe(719);
+  });
+
+  it('arrow keys step from the current value after undo and playhead moves', () => {
+    env.store.select(env.v1.id);
+    drag(range('Scale'), [279]);
+    range('Scale').focus();
+    env.store.undo();
+    const num = field('Scale').querySelector('.num-input');
+    num.focus();
+    arrow(num, 'ArrowUp');
+    expect(clip(env.v1.id).transform.scale).toBeCloseTo(1.01);
+    // A keyframed value follows the playhead.
+    env.store.seek(1 * US);
+    field('Scale').querySelector('.kf-btn').click();
+    env.store.seek(3 * US);
+    drag(range('Scale'), [300]);
+    num.focus();
+    env.store.seek(1 * US);
+    arrow(num, 'ArrowUp');
+    expect(clip(env.v1.id).keyframes.scale.find((k) => k.t === 1 * US).v).toBeCloseTo(1.02);
+  });
+});
+
+describe('keyboard focus survives list updates', () => {
+  const press = (selector) => {
+    const b = env.el.querySelector(selector);
+    b.focus();
+    b.click();
+  };
+  const focused = () => document.activeElement;
+
+  it('clip effects: on/off, reorder and remove', () => {
+    env.store.select(env.v1.id);
+    env.ctx.actions.addClipEffect(env.v1.id, 'blur');
+    env.ctx.actions.addClipEffect(env.v1.id, 'glow');
+    tab('Effects').click();
+    press('.clipfx-item:nth-child(1) .clipfx-on');
+    expect(clip(env.v1.id).effects[0].off).toBe(true);
+    expect(focused()).toBe(env.el.querySelector('.clipfx-item:nth-child(1) .clipfx-on'));
+    press('.clipfx-item:nth-child(2) [aria-label$=" up"]');
+    expect(clip(env.v1.id).effects.map((e) => e.id)).toEqual(['glow', 'blur']);
+    // Focus follows the moved effect; at the top its Move up is off, so Move down.
+    expect(focused().getAttribute('aria-label')).toMatch(/^Move .* down$/);
+    expect(focused().closest('.clipfx-item')).toBe(env.el.querySelector('.clipfx-item:nth-child(1)'));
+    press('.clipfx-item:nth-child(2) [aria-label^="Remove"]');
+    expect(clip(env.v1.id).effects).toHaveLength(1);
+    expect(focused().getAttribute('aria-label')).toMatch(/^Remove /);
+    press('.clipfx-item [aria-label^="Remove"]');
+    expect(focused()).toBe(env.el.querySelector('.clipfx-add'));
+  });
+
+  it('masks: hide, select, reorder and delete', () => {
+    env.store.select(env.v1.id);
+    tab('Mask').click();
+    env.el.querySelector('.mask-tile[data-shape=ellipse]').click();
+    env.el.querySelector('.mask-tile[data-shape=rectangle]').click();
+    press('[aria-label="Hide mask 1"]');
+    expect(clip(env.v1.id).masks[0].hidden).toBe(true);
+    expect(focused()).toBe(env.el.querySelector('[aria-label="Show mask 1"]'));
+    press('[aria-label^="Mask 1,"]');
+    expect(focused()).toBe(env.el.querySelector('[aria-label^="Mask 1,"]'));
+    press('[aria-label="Move down mask 1"]');
+    expect(clip(env.v1.id).masks.map((m) => m.type)).toEqual(['rectangle', 'ellipse']);
+    expect(focused()).toBe(env.el.querySelector('[aria-label="Move up mask 2"]'));
+    press('[aria-label="Delete mask 2"]');
+    expect(focused()).toBe(env.el.querySelector('[aria-label="Delete mask 1"]'));
+  });
+
+  it('highlight word chips', () => {
+    env.store.select(env.text.id);
+    env.el.querySelectorAll('.section-toggle[aria-expanded=false]').forEach((x) => x.click());
+    press('.mark-chip');
+    expect(clip(env.text.id).marks).toEqual([0]);
+    expect(focused()).toBe(env.el.querySelector('.mark-chip'));
+    expect(focused().getAttribute('aria-pressed')).toBe('true');
   });
 });

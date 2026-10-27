@@ -100,6 +100,22 @@ describe('commands', () => {
     const { commands, store } = await load(false);
     commands.run('frameForward');
     expect(store.time).toBe(Math.round(s(1) / 30));
+    // Frame starts as the export rounds them, not a sum of rounded steps (66,666 shows frame 1).
+    commands.run('frameForward');
+    expect(store.time).toBe(66_667);
+    commands.run('frameForward');
+    commands.run('framesBack');
+    expect(store.time).toBe(0);
+    // From between frames: one frame on from the frame on screen, none skipped.
+    store.seek(50_000); // frame 1 is on screen
+    commands.run('frameForward');
+    expect(store.time).toBe(66_667);
+    store.seek(1_250_000); // frame 37 is on screen
+    commands.run('frameBack');
+    expect(store.time).toBe(1_200_000);
+    store.seek(1_220_000); // frame 36
+    commands.run('frameForward');
+    expect(store.time).toBe(1_233_333);
     commands.run('toEnd');
     expect(store.time).toBe(s(4));
     commands.run('prevEdit');

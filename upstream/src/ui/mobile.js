@@ -17,6 +17,7 @@ import { icon } from '../lib/icons.js';
 import { RATIOS } from '../model/project.js';
 import { ANIMATIONS } from '../model/catalog.js';
 import * as T from '../model/timeline.js';
+import { hasCurve, sourceSpan } from '../model/speed-curve.js';
 import { createSheet } from './sheet.js';
 import { showMenu } from './menu.js';
 import { sliderField, segmented } from './controls.js';
@@ -73,13 +74,14 @@ function arrowNav(bar) {
 
 /**
  * createMobileChrome(ctx, root, { matchMedia })
- * root is the editor element. Returns { mode, setMode(forced|null), openAssets(id), openDetails(), dispose() }.
+ * root is the editor element. Returns { mode, setMode(forced|null), setNarrowWorkspace(on), openAssets(id), openDetails(), dispose() }.
  */
 export function createMobileChrome(ctx, root, { matchMedia: mmImpl } = {}) {
   const { store, actions } = ctx;
   const mm = mmImpl || ((q) => window.matchMedia(q));
   const mqls = [mm(PHONE_QUERY), mm(TABLET_QUERY)];
   let forced = null;
+  let narrow = false;
   let mode = null;
 
   // Where the panels live on desktop, so they can go back.
@@ -217,11 +219,19 @@ export function createMobileChrome(ctx, root, { matchMedia: mmImpl } = {}) {
     const c = store.selected?.clip;
     if (!c) return;
     const id = c.id;
-    const slider = sliderField({ label: 'Speed', min: 0.1, max: 10, step: 0.05, value: c.speed || 1, onInput: (v) => {
-      actions.setSpeed(id, v);
+    // A drag keeps the footage it began with, so a neighbor that cuts the clip short mid-drag doesn't shorten it for good.
+    let span;
+    const slider = sliderField({ label: 'Speed', min: 0.1, max: 10, step: 0.05, value: c.speed || 1, onInput: (v, final) => {
+      const now = T.findClip(store.project, id)?.clip;
+      if (span === undefined && now) span = hasCurve(now) ? sourceSpan(now) : now.duration * now.speed;
+      actions.setSpeed(id, v, { span });
+      if (final) span = undefined;
       seg.set(v);
     } });
+    // The box takes any speed the clip allows, past the slider's 10x.
+    slider.setLimits(0.1, 100);
     const seg = segmented({ label: 'Speed presets', className: 'm-speed-presets', options: SPEEDS.map((v) => ({ value: v, label: `${v}x` })), value: c.speed || 1, onChange: (v) => {
+      span = undefined;
       actions.setSpeed(id, v);
       slider.set(v);
       announce(`Speed ${v}x`);
@@ -236,6 +246,7 @@ export function createMobileChrome(ctx, root, { matchMedia: mmImpl } = {}) {
     const slider = sliderField({ label: 'Volume', min: 0, max: 200, step: 1, value: Math.round((c.volume ?? 1) * 100), unit: '%', onInput: (v) => {
       actions.setAnimatable(id, 'volume', v / 100, { label: 'Volume', coalesce: `vol:${id}` });
     } });
+    slider.setLimits(0, 1000);
     const mute = h('button.btn.m-mute', { type: 'button', 'aria-pressed': String(Boolean(c.muted)) }, icon(c.muted ? 'mute' : 'volume', 16), h('span', c.muted ? 'Unmute clip' : 'Mute clip'));
     mute.addEventListener('click', () => {
       actions.toggleClipMute(id);
@@ -359,11 +370,15 @@ export function createMobileChrome(ctx, root, { matchMedia: mmImpl } = {}) {
     ctx.timeline.setCentered?.(next === 'phone');
     syncBars();
     syncHistory();
+    ctx.assistant?.relayout?.();
     requestAnimationFrame(() => ctx.playerView.relayout?.());
   }
 
   function update() {
-    apply(forced || layoutMode((q) => (q === PHONE_QUERY ? mqls[0] : mqls[1]).matches));
+    const screen = layoutMode((q) => (q === PHONE_QUERY ? mqls[0] : mqls[1]).matches);
+    // A desktop screen whose workspace is too narrow for both side panels (a small window
+    // with the AI sidebar open) uses the tablet layout: Details moves into a sheet.
+    apply(forced || (screen === 'desktop' && narrow ? 'tablet' : screen));
   }
   for (const q of mqls) q.addEventListener?.('change', update);
 
@@ -383,6 +398,12 @@ export function createMobileChrome(ctx, root, { matchMedia: mmImpl } = {}) {
     /** Force a layout ('phone' | 'tablet' | 'desktop'), or null to follow the screen. */
     setMode(m) {
       forced = m || null;
+      update();
+    },
+    /** Whether the workspace is too narrow for the desktop layout's two side panels. */
+    setNarrowWorkspace(on) {
+      if (narrow === Boolean(on)) return;
+      narrow = Boolean(on);
       update();
     },
     openAssets,

@@ -40,10 +40,31 @@ export function aspectForSize(width, height) {
   return IMAGE_ASPECTS.reduce((best, a) => (Math.abs(Math.log(a.w / a.h / r)) < Math.abs(Math.log(best.w / best.h / r)) ? a : best), IMAGE_ASPECTS[0]);
 }
 
+/**
+ * The picture models the AI assistant offers (from Puter's catalog); every
+ * one can also change a picture it is given (input_image). 'default' sends
+ * no model and lets Puter choose (GPT Image 2). options go with each request.
+ */
+export const IMAGE_MODELS = [
+  { id: 'default', label: 'GPT Image 2', hint: "Puter's default", model: null },
+  { id: 'gpt-image-2.5', label: 'GPT Image 2.5', hint: 'Newest from OpenAI', model: 'gpt-image-2.5-sunburst', options: { quality: 'medium' } },
+  { id: 'gemini-3-pro', label: 'Gemini 3 Pro Image', hint: 'Detailed, good with text', model: 'gemini-3-pro-image' },
+  { id: 'nano-banana-2.1', label: 'Nano Banana 2.1', hint: 'Fast, strong at edits', model: 'gemini-nano-banana-2.1' },
+  { id: 'seedream-5-pro', label: 'Seedream 5.0 Pro', hint: 'ByteDance, photoreal', model: 'dola-seedream-5-0-pro-260628' },
+];
+export const DEFAULT_IMAGE_MODEL = 'default';
+export const imageModel = (id) => IMAGE_MODELS.find((m) => m.id === id) || IMAGE_MODELS[0];
+
+/** The model fields of a txt2img request for an IMAGE_MODELS id (none for the default). */
+export function imageModelOptions(id) {
+  const m = imageModel(id);
+  return m.model ? { model: m.model, ...m.options } : {};
+}
+
 /** Options for puter.ai.txt2img. */
-export function txt2imgOptions(aspectId, { testMode = false } = {}) {
+export function txt2imgOptions(aspectId, { testMode = false, model = DEFAULT_IMAGE_MODEL } = {}) {
   const a = IMAGE_ASPECTS.find((x) => x.id === aspectId) || IMAGE_ASPECTS[0];
-  return { ratio: { w: a.w, h: a.h }, ...(testMode ? { test_mode: true } : {}) };
+  return { ratio: { w: a.w, h: a.h }, ...imageModelOptions(model), ...(testMode ? { test_mode: true } : {}) };
 }
 
 /** A user-facing message for a failed request. */
@@ -121,13 +142,13 @@ export async function cropToAspect(blob, w, h) {
 }
 
 /** Create a picture: { blob, prompt }. Throws Errors with readable messages. */
-export async function generateImage(text, { aspect = '16:9', style = 'none', testMode = false } = {}) {
+export async function generateImage(text, { aspect = '16:9', style = 'none', model = DEFAULT_IMAGE_MODEL, testMode = false } = {}) {
   const prompt = buildPrompt(text, style);
   if (!prompt) throw new Error('Describe the picture first.');
   if (typeof puter === 'undefined' || !puter.ai?.txt2img) throw new Error('Picture generation needs Puter.');
   let result;
   try {
-    result = await puter.ai.txt2img(prompt, txt2imgOptions(aspect, { testMode }));
+    result = await puter.ai.txt2img(prompt, txt2imgOptions(aspect, { testMode, model }));
   } catch (err) {
     throw new Error(imageErrorMessage(err));
   }

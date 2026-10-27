@@ -24,6 +24,10 @@ import { parseCube, lutName } from '../model/cube.js';
 import { opfsBackend, opfsAvailable } from './backends.js';
 
 const DAY = 24 * 60 * 60 * 1000;
+/** A failed media upload is tried again after 5 s, then less and less often, up to every 2 minutes. */
+const UPLOAD_RETRY = [5_000, 15_000, 30_000, 60_000, 120_000];
+/** A listing of the media folder is reused this long (a batch of imports lists it once). */
+const MEDIA_LIST_AGE = 30_000;
 /** Projects in the Trash are deleted for good after this many days. */
 export const TRASH_DAYS = 30;
 
@@ -34,7 +38,10 @@ export class Library extends Emitter {
     this.cache = cache !== undefined ? cache : backend.kind === 'puter' && opfsAvailable() ? opfsBackend('video-studio-cache') : null;
     this.urls = new Map(); // hash -> object URL
     this.blobs = new Map(); // hash -> Blob (recent imports and reads)
+    this.reads = new Map(); // hash -> Promise<Blob>: files being read, shared by everyone asking
+    this.stored = null; // { at, files: Promise<Map(name -> size)> }: recent listing of the media folder
     this.uploads = new Map(); // hash -> Promise
+    this.failed = new Map(); // hash -> { asset, blob, tries, timer }: uploads that failed, tried again later
     this.index = null;
     this.luts = null; // LUT list, read on first use
   }
@@ -74,12 +81,45 @@ export class Library extends Emitter {
     return out;
   }
 
-  async _updateIndex(fn) {
-    const index = this.index || (await this._readIndex());
-    const next = fn([...index]);
-    this.index = next;
-    await this.backend.writeJSON('index.json', next);
-    this.emit('index', next);
+  /**
+   * Change the project list. Changes run one after another (two at once would
+   * read the same list and the second write would drop the first one's
+   * change); changes asked for while one is being written share the next
+   * read and write.
+   */
+  _updateIndex(fn) {
+    return new Promise((resolve, reject) => {
+      const first = !this._indexPending;
+      (this._indexPending ||= []).push({ fn, resolve, reject });
+      if (first) this._indexQueue = (this._indexQueue || Promise.resolve()).then(() => this._writeIndex());
+    });
+  }
+
+  async _writeIndex() {
+    const batch = this._indexPending;
+    this._indexPending = null;
+    try {
+      // Read it again: another tab or device may have changed it since. If it
+      // can't be read, keep working from the list this tab knows.
+      let index = await this.backend.readJSON('index.json').catch(() => undefined);
+      if (!Array.isArray(index)) index = this.index || (await this._readIndex());
+      let next = [...index];
+      for (const { fn } of batch) next = fn([...next]);
+      this.index = next;
+      await this.backend.writeJSON('index.json', next);
+      this.emit('index', next);
+      for (const { resolve } of batch) resolve();
+    } catch (err) {
+      for (const { reject } of batch) reject(err);
+    }
+  }
+
+  /** "Project N" with the lowest N no project (Trash included) is called. */
+  async nextProjectName() {
+    const used = new Set((await this._readIndex()).map((p) => String(p.name).trim().toLowerCase()));
+    let n = 1;
+    while (used.has(`project ${n}`)) n++;
+    return `Project ${n}`;
   }
 
   async createProject(opts) {
@@ -88,10 +128,23 @@ export class Library extends Emitter {
     return project;
   }
 
+  /** Open a project document. Errors for a missing or damaged file have unreadable set. */
   async openProject(id) {
-    const raw = await this.backend.readJSON(`projects/${id}.json`);
-    if (!raw) throw new Error('This project could not be found. It may have been deleted.');
-    const project = normalizeProject(raw);
+    const unreadable = (message) => Object.assign(new Error(message), { unreadable: true });
+    let raw;
+    try {
+      raw = await this.backend.readJSON(`projects/${id}.json`);
+    } catch (err) {
+      if (err instanceof SyntaxError) throw unreadable('This project file is damaged.');
+      throw err;
+    }
+    if (!raw) throw unreadable('This project could not be found. It may have been deleted.');
+    let project;
+    try {
+      project = normalizeProject(raw);
+    } catch (err) {
+      throw unreadable(err?.message || 'This project file is damaged.');
+    }
     // The file name is the id: a document without one (or with another) must still save back to this file.
     project.id = id;
     return project;
@@ -126,7 +179,8 @@ export class Library extends Emitter {
 
   /** Move a project to the Trash. It keeps its files until it is deleted for good or purged. */
   async trashProject(id, now = Date.now()) {
-    const p = await this.openProject(id);
+    const p = await this._openOrEntry(id);
+    if (!p) return this._editEntry(id, (e) => ({ ...e, deletedAt: now }));
     p.deletedAt = now;
     await this.saveProject(p);
     return p;
@@ -134,10 +188,30 @@ export class Library extends Emitter {
 
   /** Bring a project back from the Trash. */
   async restoreProject(id) {
-    const p = await this.openProject(id);
+    const p = await this._openOrEntry(id);
+    if (!p) return this._editEntry(id, ({ deletedAt, ...e }) => e);
     delete p.deletedAt;
     await this.saveProject(p);
     return p;
+  }
+
+  /**
+   * The project, or null when its file is missing or damaged but the list has
+   * an entry for it: that entry can still go to the Trash and be deleted.
+   */
+  async _openOrEntry(id) {
+    try {
+      return await this.openProject(id);
+    } catch (err) {
+      if (err?.unreadable && (this.index || (await this._readIndex())).some((e) => e.id === id)) return null;
+      throw err;
+    }
+  }
+
+  async _editEntry(id, fn) {
+    let entry = null;
+    await this._updateIndex((list) => list.map((e) => (e.id === id ? (entry = fn(e)) : e)));
+    return entry;
   }
 
   /** Delete every project in the Trash for good. Returns the ids removed. */
@@ -182,6 +256,38 @@ export class Library extends Emitter {
 
   async coverBlob(id) {
     return this.backend.readBlob(`covers/${id}.jpg`).catch(() => null);
+  }
+
+  /**
+   * Claim a project while the editor has it open, so another tab of this
+   * browser opening it too can warn first. Resolves { held, release() }:
+   * held is false when another tab has it open (this one then takes over
+   * the claim once that tab lets go). Without navigator.locks, always held.
+   */
+  async claimProject(id) {
+    const locks = typeof navigator !== 'undefined' ? navigator.locks : null;
+    if (!locks?.request) return { held: true, release() {} };
+    const name = `video-studio:project:${id}`;
+    let letGo;
+    const done = new Promise((r) => (letGo = r));
+    const stop = new AbortController();
+    const held = await new Promise((resolve) => {
+      locks
+        .request(name, { ifAvailable: true }, (lock) => {
+          resolve(Boolean(lock));
+          return lock ? done : null;
+        })
+        .catch(() => resolve(true));
+    });
+    // Opened anyway: take the claim over when the other tab lets go, so a third tab is warned too.
+    if (!held) locks.request(name, { signal: stop.signal }, () => done).catch(() => {});
+    return {
+      held,
+      release() {
+        stop.abort();
+        letGo();
+      },
+    };
   }
 
   mediaPath(asset) {
@@ -237,43 +343,107 @@ export class Library extends Emitter {
   _store(asset, blob) {
     const key = asset.hash;
     if (this.uploads.has(key)) return this.uploads.get(key);
+    const retry = this.failed.get(key);
+    if (retry) {
+      clearTimeout(retry.timer);
+      this.failed.delete(key);
+    }
     const path = this.mediaPath(asset);
     const job = (async () => {
       // Same content imported before: nothing to upload.
-      const existing = await this.backend.list('media').catch(() => []);
-      if (!existing.some((f) => f.name === `${asset.hash}.${asset.ext}` && (!f.size || f.size === blob.size))) {
+      const name = `${asset.hash}.${asset.ext}`;
+      const stored = await this._storedMedia();
+      const size = stored.get(name);
+      if (size === undefined || (size && size !== blob.size)) {
         await this.backend.writeBlob(path, blob);
+        stored.set(name, blob.size);
       }
       if (this.cache) await this.cache.writeBlob(path, blob).catch(() => {});
     })();
     this.uploads.set(key, job);
-    this.emit('uploads', { pending: this.pendingUploads });
+    this._emitUploads();
     job.then(
       () => {
         this.uploads.delete(key);
-        this.emit('uploads', { pending: this.pendingUploads });
+        this._emitUploads();
       },
       (err) => {
         this.uploads.delete(key);
-        this.emit('uploads', { pending: this.pendingUploads, error: err });
+        // The blob stays in memory (see releaseMedia) until a later try stores it.
+        const tries = (retry?.tries || 0) + 1;
+        const timer = setTimeout(() => this._store(asset, blob), UPLOAD_RETRY[Math.min(tries, UPLOAD_RETRY.length) - 1]);
+        this.failed.set(key, { asset, blob, tries, timer });
+        this._emitUploads(err);
       },
     );
     return job;
   }
 
+  /** Names and sizes of the files in the media folder, listed at most every MEDIA_LIST_AGE. */
+  _storedMedia(fresh = false) {
+    const now = Date.now();
+    if (fresh || !this.stored || now - this.stored.at > MEDIA_LIST_AGE) {
+      const files = this.backend.list('media').then((list) => new Map(list.filter((f) => !f.isDir).map((f) => [f.name, f.size || 0])));
+      this.stored = { at: now, files };
+      // A failed listing is not kept: the next upload lists again (and this one uploads).
+      files.catch(() => this.stored?.files === files && (this.stored = null));
+    }
+    return this.stored.files.catch(() => new Map());
+  }
+
+  _emitUploads(error) {
+    this.emit('uploads', { pending: this.pendingUploads, failed: this.failed.size, ...(error ? { error } : {}) });
+  }
+
+  /** Media files uploading right now. */
   get pendingUploads() {
     return this.uploads.size;
   }
 
-  /** Wait for every media upload to finish (before closing a project). */
-  async flushUploads() {
-    await Promise.allSettled([...this.uploads.values()]);
+  /** Media files not stored yet: uploading, or waiting to be tried again after a failure. */
+  get unsavedMedia() {
+    return this.uploads.size + this.failed.size;
   }
 
-  /** The media file for an asset as a Blob (memory, then local cache, then storage). */
-  async mediaBlob(asset) {
+  /**
+   * Wait for every media upload to finish, trying failed ones again now
+   * (before the page or window closes). Resolves true when all are stored.
+   */
+  async flushUploads() {
+    for (const { asset, blob } of [...this.failed.values()]) this._store(asset, blob);
+    await Promise.allSettled([...this.uploads.values()]);
+    return this.failed.size === 0;
+  }
+
+  /**
+   * The assets whose media file is not in storage, from one listing of the
+   * media folder. Files still being uploaded (or retried) are not missing.
+   */
+  async missingMedia(assets) {
+    this._storedMedia(true);
+    const stored = await this.stored.files;
+    return assets.filter((a) => !stored.has(`${a.hash}.${a.ext}`) && !this.uploads.has(a.hash) && !this.failed.has(a.hash));
+  }
+
+  /**
+   * The media file for an asset as a Blob (memory, then local cache, then
+   * storage). keep: false reads it without holding it in memory afterwards.
+   */
+  async mediaBlob(asset, { keep = true } = {}) {
     const hit = this.blobs.get(asset.hash);
     if (hit) return hit;
+    // Posters, waveforms, thumbnails and the player ask at once when a project opens: read it once.
+    let read = this.reads.get(asset.hash);
+    if (!read) {
+      read = this._readMedia(asset).finally(() => this.reads.delete(asset.hash));
+      this.reads.set(asset.hash, read);
+    }
+    const blob = await read;
+    if (keep) this.blobs.set(asset.hash, blob);
+    return blob;
+  }
+
+  async _readMedia(asset) {
     const path = this.mediaPath(asset);
     let blob = this.cache ? await this.cache.readBlob(path).catch(() => null) : null;
     if (!blob) {
@@ -282,7 +452,6 @@ export class Library extends Emitter {
       if (asset.mime && blob.type !== asset.mime) blob = new Blob([blob], { type: asset.mime });
       if (this.cache) this.cache.writeBlob(path, blob).catch(() => {});
     }
-    this.blobs.set(asset.hash, blob);
     return blob;
   }
 
@@ -347,8 +516,8 @@ export class Library extends Emitter {
   releaseMedia() {
     for (const url of this.urls.values()) URL.revokeObjectURL(url);
     this.urls.clear();
-    // Keep blobs for files still uploading.
-    for (const key of [...this.blobs.keys()]) if (!this.uploads.has(key)) this.blobs.delete(key);
+    // Keep blobs for files not stored yet: they are the only copy.
+    for (const key of [...this.blobs.keys()]) if (!this.uploads.has(key) && !this.failed.has(key)) this.blobs.delete(key);
   }
 }
 
@@ -397,6 +566,7 @@ export class AutoSaver extends Emitter {
       })
       .catch((err) => {
         console.error(err);
+        this.error = err;
         this._set('error', err);
         clearTimeout(this.timer);
         this.timer = setTimeout(() => this.save(), 8000);
@@ -407,9 +577,14 @@ export class AutoSaver extends Emitter {
     return this.saving;
   }
 
+  /**
+   * Save pending edits now. Rejects when they could not be saved, so callers
+   * leaving the editor can warn first (the retry keeps going meanwhile).
+   */
   async flush() {
     if (this.timer || this.store.dirty) await this.save();
     else if (this.saving) await this.saving;
+    if (this.status === 'error' && this.store.dirty) throw this.error || new Error("Couldn't save your changes.");
   }
 
   dispose() {

@@ -204,6 +204,18 @@ describe('Wheels', () => {
   });
 });
 
+describe('wheel brightness', () => {
+  it('follows undo while it has focus', () => {
+    tab('Wheels').click();
+    const level = env.el.querySelectorAll('.wheel-level')[0];
+    level.focus();
+    drag(level, [30]);
+    expect(clip(env.v1.id).grade.wheels.shadows.l).toBe(30);
+    env.store.undo();
+    expect(level.value).toBe('0');
+  });
+});
+
 describe('presets and the Color assets tab', () => {
   it('saves a clip look, applies it to another clip and lists it', () => {
     drag(range('Contrast'), [25]);
@@ -234,5 +246,42 @@ describe('presets and the Color assets tab', () => {
     expect(c.adjust.exposure).toBe(100);
     expect('nope' in c.adjust).toBe(false);
     expect(c.grade).toEqual({ hsl: { red: { h: 5, s: 0, l: 0 } } });
+  });
+});
+
+describe('reset buttons and keyboard focus', () => {
+  const press = (b) => {
+    b.focus();
+    b.click();
+  };
+
+  it('a wheel reset moves focus to its wheel', () => {
+    tab('Wheels').click();
+    const [shadows] = env.el.querySelectorAll('.wheel-disk');
+    key(shadows, 'ArrowRight', { shiftKey: true });
+    const reset = env.el.querySelector('.wheel-card .icon-btn');
+    press(reset);
+    expect(reset.disabled).toBe(true);
+    expect(document.activeElement).toBe(shadows);
+  });
+
+  it('an HSL range reset moves focus to the range', () => {
+    tab('HSL').click();
+    env.el.querySelector('.hsl-swatch[data-id=blue]').click();
+    drag(range('Saturation'), [-20]);
+    const reset = env.el.querySelector('.hsl-foot .btn');
+    press(reset);
+    expect(reset.disabled).toBe(true);
+    expect(document.activeElement).toBe(env.el.querySelector('.hsl-swatch[data-id=blue]'));
+  });
+
+  it('a curve reset moves focus to the curve', () => {
+    tab('Curves').click();
+    const canvas = env.el.querySelector('.curve-canvas');
+    key(canvas, '+');
+    const reset = env.el.querySelector('.curve-head .icon-btn');
+    press(reset);
+    expect(reset.disabled).toBe(true);
+    expect(document.activeElement).toBe(canvas);
   });
 });

@@ -1,12 +1,21 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   groupWords, joinWords, wrapCaption, segmentsToWords, distributeText, speechRegions,
   parseSubtitles, toSrt, buildCaptionClips, captionCues, splitForTranscription, lineCharsFor, CAPTION_POSITIONS,
+  mixdown,
 } from '../src/media/transcribe.js';
+import { captionsTab } from '../src/ui/panels/captions.js';
+import { EditorStore } from '../src/model/store.js';
+import { createActions } from '../src/ui/actions.js';
+import { setPref } from '../src/ui/prefs.js';
+import { fixture, clip, onMain, s } from './helpers.js';
 import { createProject } from '../src/model/project.js';
 import { TEXT_PRESETS } from '../src/model/catalog.js';
 
 const W = (text, start, end) => ({ text, start, end });
+
+// Decoding needs WebCodecs; the Generate test only needs a mix to hand on.
+vi.mock('../src/media/transcribe.js', async (orig) => ({ ...(await orig()), mixdown: vi.fn(async () => new Float32Array(16000)) }));
 
 describe('groupWords', () => {
   it('caps words per caption', () => {
@@ -127,6 +136,21 @@ describe('subtitle files', () => {
     ]);
   });
 
+  it('keeps text that only looks like markup, and drops real tags', () => {
+    const srt = '1\n00:00:01,000 --> 00:00:02,000\nif a < b and c > d\n\n2\n00:00:03,000 --> 00:00:04,000\n<font color="#ff0">One</font> <00:00:03.500><c.loud>two</c> <b>3</b> <3\n';
+    expect(parseSubtitles(srt).map((c) => c.text)).toEqual(['if a < b and c > d', 'One two 3 <3']);
+  });
+
+  it('drops HTML left in converted subtitles and turns <br> into a line break', () => {
+    const srt = '1\n00:00:01,000 --> 00:00:02,000\nline one<br>line two<br/>three\n\n2\n00:00:03,000 --> 00:00:04,000\n<span style="color:red">Yellow</span> <em>text</em> <p>para</p>\n';
+    expect(parseSubtitles(srt).map((c) => c.text)).toEqual(['line one\nline two\nthree', 'Yellow text para']);
+  });
+
+  it('round-trips captions with blank lines in them', () => {
+    const cues = [{ start: 1, end: 2, text: 'First line\n\n  \nafter blank' }, { start: 3, end: 4, text: 'Second' }];
+    expect(parseSubtitles(toSrt(cues))).toEqual([{ start: 1, end: 2, text: 'First line\nafter blank' }, { start: 3, end: 4, text: 'Second' }]);
+  });
+
   it('skips broken cues', () => {
     expect(parseSubtitles('1\n00:00:02,000 --> 00:00:01,000\nbackwards\n\n2\nno timing\n\n3\n00:00:01,000 --> 00:00:02,000\n\n')).toEqual([]);
   });
@@ -161,6 +185,15 @@ describe('buildCaptionClips', () => {
     }
   });
 
+  it('shows cues that start together as one caption instead of a one-frame flash', () => {
+    const clips = buildCaptionClips([
+      { start: 1, end: 2, text: 'Speaker A' },
+      { start: 1, end: 2.5, text: 'Speaker B says more' },
+      { start: 3, end: 4, text: 'Next' },
+    ], { lineChars: 12 });
+    expect(clips.map((c) => [c.start / 1e6, c.duration / 1e6, c.text])).toEqual([[1, 1.5, 'Speaker A\nSpeaker B\nsays more'], [3, 1, 'Next']]);
+  });
+
   it('applies an offset and wraps long lines', () => {
     const [c] = buildCaptionClips([{ start: 0, end: 1, text: 'one two three four' }], { offset: 2, lineChars: 8 });
     expect(c.start).toBe(2_000_000);
@@ -173,5 +206,68 @@ describe('buildCaptionClips', () => {
     const clips = buildCaptionClips([{ start: 0, end: 1, text: 'x' }, { start: 1, end: 2, text: 'y' }]);
     p.tracks.unshift({ id: 't1', kind: 'text', locked: false, hidden: false, muted: false, clips });
     expect(captionCues(p)).toEqual([{ start: 0, end: 1, text: 'x' }, { start: 1, end: 2, text: 'y' }]);
+  });
+});
+
+describe('Generate captions in the Captions tab', () => {
+  afterEach(() => {
+    delete globalThis.puter;
+    delete globalThis.__vsFakeTranscript;
+    document.body.replaceChildren();
+  });
+
+  it('Generate adds captions from the speech', async () => {
+    setPref('captionOpts', {});
+    globalThis.puter = { ai: {} };
+    globalThis.__vsFakeTranscript = async () => [W('Hello', 0.2, 0.5), W('there', 0.6, 0.9)];
+    const p = fixture();
+    onMain(p, clip('video', 0, 6));
+    const store = new EditorStore(p);
+    const ctx = { store, player: null, library: { backend: { kind: 'puter' } }, account: {} };
+    ctx.actions = createActions(ctx);
+    const tab = captionsTab(ctx);
+    document.body.append(tab.el);
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const gen = [...tab.el.querySelectorAll('.cap-form button')].find((b) => b.textContent === 'Generate');
+    gen.click();
+    await vi.waitFor(() => expect(store.project.tracks.flatMap((t) => t.clips).filter((c) => c.caption)).toHaveLength(1));
+    expect(store.project.tracks.flatMap((t) => t.clips).find((c) => c.caption).text).toBe('Hello there');
+    expect(err).not.toHaveBeenCalled();
+    expect(mixdown).toHaveBeenCalled();
+    expect(gen.disabled).toBe(false);
+    err.mockRestore();
+    tab.dispose?.();
+  });
+});
+
+describe('Transcript in the Captions tab', () => {
+  afterEach(() => {
+    delete globalThis.puter;
+    delete globalThis.__vsFakeTranscript;
+    document.body.replaceChildren();
+  });
+
+  it('keeps words on their media after a timeline edit', async () => {
+    setPref('captionOpts', {});
+    globalThis.puter = { ai: {} };
+    globalThis.__vsFakeTranscript = async () => [W('Hello', 0.5, 1), W('there', 4.5, 5)];
+    const p = fixture();
+    const [first] = onMain(p, clip('video', 0, 4), clip('video', 4, 4, { in: s(4) }));
+    const store = new EditorStore(p);
+    const ctx = { store, player: null, library: { backend: { kind: 'puter' } }, account: {} };
+    ctx.actions = createActions(ctx);
+    const tab = captionsTab(ctx);
+    document.body.append(tab.el);
+    [...tab.el.querySelectorAll('.asset-cat')].find((b) => b.textContent === 'Transcript').click();
+    [...tab.el.querySelectorAll('button')].find((b) => b.textContent === 'Transcribe').click();
+    await vi.waitFor(() => expect(tab.el.querySelectorAll('.tr-word')).toHaveLength(2));
+    store.select(first.id);
+    ctx.actions.deleteSelected();
+    const words = [...tab.el.querySelectorAll('.tr-word')];
+    expect(words.map((w) => w.textContent)).toEqual(['there']);
+    words[0].dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1 }));
+    words[0].dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 1 }));
+    expect(store.time).toBe(s(0.5));
+    tab.dispose?.();
   });
 });

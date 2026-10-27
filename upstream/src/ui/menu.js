@@ -31,7 +31,7 @@ function position(menu, anchorRect, { align = 'start', side = 'bottom' } = {}) {
 }
 
 /**
- * Show a menu. anchor is an element (menu button) or a {x, y} point.
+ * Show a menu. anchor is an element (menu button), a rect or a {x, y} point.
  * Returns a handle with close().
  */
 export function showMenu(anchor, items, opts = {}) {
@@ -39,17 +39,24 @@ export function showMenu(anchor, items, opts = {}) {
   const menu = h('div.menu', { role: 'menu', tabindex: '-1', 'aria-label': opts.label || null });
   const entries = [];
   let child = null;
+  // Where focus goes back to on close: the menu button, the item that opened a submenu, or
+  // for a context menu at a point (right click, Shift+F10) whatever had focus when it opened.
+  const byElement = anchor instanceof Element || Boolean(opts.opener);
+  const returnTo = anchor instanceof Element ? anchor : opts.opener || (document.activeElement !== document.body ? document.activeElement : null);
   const handle = {
     el: menu,
     close(returnFocus = true) {
       child?.close(false);
+      const hadFocus = menu.contains(document.activeElement);
       menu.remove();
       document.removeEventListener('pointerdown', onOutside, true);
       window.removeEventListener('blur', onBlur);
       window.removeEventListener('resize', onBlur);
       if (anchor instanceof Element) anchor.setAttribute('aria-expanded', 'false');
       if (openMenu === handle) openMenu = null;
-      if (returnFocus && anchor instanceof Element && document.contains(anchor)) anchor.focus({ preventScroll: true });
+      // A context menu only takes focus back if it still had it (focus may have moved on).
+      const lost = hadFocus || !document.activeElement || document.activeElement === document.body;
+      if (returnFocus && returnTo && document.contains(returnTo) && (byElement || lost)) returnTo.focus({ preventScroll: true });
       opts.onClose?.();
     },
   };
@@ -85,7 +92,7 @@ export function showMenu(anchor, items, opts = {}) {
     const openSub = () => {
       child?.close(false);
       const rect = btn.getBoundingClientRect();
-      child = showMenu(rect, typeof it.submenu === 'function' ? it.submenu() : it.submenu, { nested: true, side: 'right', label: it.label, onClose: () => btn.setAttribute('aria-expanded', 'false'), parent: handle });
+      child = showMenu(rect, typeof it.submenu === 'function' ? it.submenu() : it.submenu, { nested: true, side: 'right', label: it.label, opener: btn, onClose: () => btn.setAttribute('aria-expanded', 'false'), parent: handle });
       btn.setAttribute('aria-expanded', 'true');
       return child;
     };
@@ -134,7 +141,6 @@ export function showMenu(anchor, items, opts = {}) {
       e.preventDefault();
       e.stopPropagation();
       handle.close(true);
-      if (handle.parent) handle.parent.focusFirst?.();
     } else if (e.key === 'ArrowRight') {
       const entry = entries.find((x) => x.btn === document.activeElement);
       if (entry?.it.submenu) {
@@ -143,7 +149,7 @@ export function showMenu(anchor, items, opts = {}) {
       }
     } else if (e.key === 'ArrowLeft' && handle.parent) {
       e.preventDefault();
-      handle.close(false);
+      handle.close(true);
     } else if (e.key === 'Tab') {
       e.preventDefault();
       let root = handle;
@@ -162,7 +168,8 @@ export function showMenu(anchor, items, opts = {}) {
     }
   });
   document.body.append(menu);
-  const rect = anchor instanceof Element ? anchor.getBoundingClientRect() : anchor.getBoundingClientRect ? anchor : { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y };
+  // An element, a rect ({left, right, top, bottom}, e.g. a DOMRect) or a {x, y} point.
+  const rect = anchor instanceof Element ? anchor.getBoundingClientRect() : 'right' in anchor ? anchor : { left: anchor.x, right: anchor.x, top: anchor.y, bottom: anchor.y };
   position(menu, rect, opts);
   if (anchor instanceof Element) anchor.setAttribute('aria-expanded', 'true');
   const onOutside = (e) => {

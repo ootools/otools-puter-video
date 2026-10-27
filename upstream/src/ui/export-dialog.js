@@ -12,7 +12,7 @@ import { projectDuration } from '../model/timeline.js';
 import { audibleClips } from '../engine/scene.js';
 import {
   RESOLUTIONS, FRAME_RATES, BITRATE_LEVELS, VIDEO_CODECS, CONTAINERS, AUDIO_FORMATS, DEFAULT_SETTINGS,
-  outputSize, videoBitrate, estimateSize, reconcile, detectCapabilities, exportProject, renderStill,
+  outputSize, videoBitrate, estimateSize, reconcile, audioCodecFor, detectCapabilities, exportProject, renderStill,
   describeError, formatBytes, safeFileName, renderFrames,
 } from '../engine/exporter.js';
 import { sliceProject, exportSpan } from '../model/slice.js';
@@ -22,6 +22,9 @@ import { openDialog, toast } from './dialog.js';
 import { prefs, setPref } from './prefs.js';
 
 let seq = 0;
+
+/** Frame rates picked in the dialog this session, by project and timeline; otherwise exports use the timeline's own. */
+const pickedFps = new Map();
 
 const signedIn = (ctx) => ctx.library?.backend?.kind === 'puter' && typeof puter !== 'undefined';
 
@@ -113,6 +116,10 @@ export function openExportDialog(ctx) {
   // With several timelines the file is named after the project and the timeline.
   const multi = (ctx.timelines?.list().length || 0) > 1;
   let s = { ...DEFAULT_SETTINGS, ...EXTRA_DEFAULTS, ...saved, name: multi ? `${full.name} - ${ctx.timelines.active().name}` : full.name };
+  // Frame rate: the timeline's own, unless another was picked for it earlier.
+  const fpsKey = `${full.id}/${full.timelineId || ''}`;
+  const ownFps = FRAME_RATES.includes(full.settings.fps) ? full.settings.fps : s.fps;
+  s.fps = pickedFps.get(fpsKey) ?? ownFps;
   // The in/out range is the natural default whenever one is set.
   if (full.range) s.scope = 'range';
   else if (s.scope === 'range' || (s.scope === 'selection' && !selection.length)) s.scope = 'all';
@@ -240,6 +247,8 @@ export function openExportDialog(ctx) {
   });
   const fps = select('Frame rate', FRAME_RATES.map((f) => ({ value: f, label: `${f} fps` })), s.fps, (v) => {
     s.fps = Number(v);
+    if (s.fps === ownFps) pickedFps.delete(fpsKey);
+    else pickedFps.set(fpsKey, s.fps);
     update();
   });
   const audioSwitchId = `exp-${++seq}`;
@@ -346,7 +355,10 @@ export function openExportDialog(ctx) {
     customNum.textContent = `${s.customMbps} Mbps`;
     bitrate.el.title = `${(bps / 1e6).toFixed(1)} Mbps`;
     const codecLabel = VIDEO_CODECS.find((c) => c.value === s.codec)?.label;
+    // The container's sound codecs may not be encodable here (MOV needs AAC).
+    const noSound = Boolean(s.video && s.includeAudio && hasSound && caps && !audioCodecFor(s.format, caps.audio));
     if (caps && !caps.video.length) codecNote.textContent = 'This browser cannot encode video. Audio export still works.';
+    else if (noSound) codecNote.replaceChildren(icon('alert', 14), `This browser cannot encode sound for ${CONTAINERS[s.format].label}. Choose another format, or turn off Export audio.`);
     else codecNote.textContent = `${size.width} x ${size.height}, ${codecLabel}, about ${(bps / 1e6).toFixed(1)} Mbps`;
     audioSwitch.disabled = !hasSound;
     audioRow.classList.toggle('disabled', !hasSound);
@@ -361,7 +373,7 @@ export function openExportDialog(ctx) {
     const bytes = (s.video || s.audio ? estimateSize(s, duration, { projW, projH }) : 0) + gifBytes;
     const nothing = !s.video && !s.audio && !s.gif && !(s.captions && hasCaptions);
     const noVideo = s.video && caps && !caps.video.length;
-    exportBtn.disabled = duration <= 0 || nothing || noVideo;
+    exportBtn.disabled = duration <= 0 || nothing || noVideo || noSound;
     scope.set(s.scope);
     footerInfo.replaceChildren(
       h('span', icon('clock', 14), `Length ${clock(duration)}`),
@@ -425,10 +437,12 @@ export function openExportDialog(ctx) {
     announce('Export started');
     results = [];
     let lastAnnounced = 0;
+    let jobName = '';
     try {
       for (let j = 0; j < jobs.length; j++) {
         const kind = jobs[j];
         const jobLabel = { video: 'Video', audio: 'Audio', gif: 'GIF', captions: 'Captions' }[kind];
+        jobName = { video: 'video', audio: 'audio file', gif: 'GIF', captions: 'captions file' }[kind];
         phaseEl.textContent = jobs.length > 1 ? `${jobLabel} (${j + 1} of ${jobs.length})` : { video: 'Rendering video', audio: 'Mixing audio', gif: 'Rendering GIF', captions: 'Writing captions' }[kind];
         stFrames.dd.textContent = '--';
         stSpeed.dd.textContent = '--';
@@ -470,13 +484,19 @@ export function openExportDialog(ctx) {
       }
       finish();
     } catch (err) {
-      if (err?.name === 'AbortError') {
-        if (!dlg.el.isConnected) return;
+      const canceled = err?.name === 'AbortError';
+      if (canceled && !dlg.el.isConnected) return;
+      if (!canceled) console.error(err);
+      // Files finished before the one that stopped are still offered.
+      if (results.length) {
+        finish({ canceled, message: canceled ? `The ${jobName} was canceled.` : `The ${jobName} could not be exported. ${describeError(err, s)}` });
+        return;
+      }
+      if (canceled) {
         announce('Export canceled');
         backToSettings();
         return;
       }
-      console.error(err);
       fail(err);
     }
   }
@@ -540,9 +560,10 @@ export function openExportDialog(ctx) {
     }
   }
 
-  function finish() {
+  /** The finished files; stopped = { canceled, message } when a later file was canceled or failed. */
+  function finish(stopped = null) {
     state = 'done';
-    titleEl.textContent = 'Export complete';
+    titleEl.textContent = stopped ? (stopped.canceled ? 'Export canceled' : 'Export failed') : 'Export complete';
     const cloud = signedIn(ctx);
     const rows = results.map((r) => {
       const status = h('p.export-file-status', { role: 'status' });
@@ -563,7 +584,8 @@ export function openExportDialog(ctx) {
     const doneView = h('div.export-layout.export-done',
       h('div.export-aside', h('div.export-still.ready', { style: { aspectRatio: `${projW} / ${projH}` } }, progressCanvas)),
       h('div.export-progress',
-        h('div.export-done-head', h('span.export-done-icon', icon('check', 18)), h('h3.export-phase', 'Your export is ready')),
+        h('div.export-done-head', h('span.export-done-icon', icon('check', 18)), h('h3.export-phase', stopped ? (results.length > 1 ? 'These files are ready' : 'This file is ready') : 'Your export is ready')),
+        stopped ? h('p.export-hint', { role: stopped.canceled ? 'status' : 'alert' }, stopped.message) : null,
         h('p.export-hint', `Finished in ${secondsLabel(took)}.`),
         h('ul.export-files', rows)));
     body.replaceChildren(doneView);
@@ -572,7 +594,8 @@ export function openExportDialog(ctx) {
     footerInfo.replaceChildren();
     footerButtons.replaceChildren(doneBtn);
     doneBtn.focus();
-    announce('Export complete');
+    if (!stopped) announce('Export complete');
+    else if (stopped.canceled) announce(stopped.message);
     if (s.destination !== 'puter' || !cloud) for (const r of results) download(r);
   }
 

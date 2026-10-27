@@ -17,12 +17,12 @@ import { FONTS, TEXT_PRESETS } from '../../model/catalog.js';
 import { DEFAULT_TEXT_STYLE } from '../../model/project.js';
 import { allClips } from '../../model/timeline.js';
 import { setKey, removeKey, keyIndexAt, valueAt } from '../../model/keyframes.js';
-import { caseOf, COLOR_KEYS, hasColorKeys, hexToRgb, rgbToHex, textColorAt } from '../../model/text-style.js';
+import { caseOf, COLOR_KEYS, hasColorKeys, hexToRgb, textColorAt } from '../../model/text-style.js';
 import { rasterizeText } from '../../engine/text.js';
 import { FONT_ACCEPT, importFontFile } from '../../media/fonts.js';
 import { segmented, section, colorField } from '../controls.js';
 import { toast } from '../dialog.js';
-import { slider, color, pressButton, propSection, row, choiceGrid, tabSet, uidFor } from './common.js';
+import { slider, color, pressButton, propSection, row, choiceGrid, tabSet, uidFor, keepFocus } from './common.js';
 import { transformSection, blendSection } from './transform.js';
 import { bubbleTab } from './text-bubble.js';
 import { effectsTab } from './text-effects.js';
@@ -80,7 +80,8 @@ function highlightSection(view) {
     announce('Key words highlighted');
   });
   const clear = h('button.btn.small.ghost', { type: 'button' }, 'Clear');
-  clear.addEventListener('click', () => setMarks('Clear highlights', () => []));
+  // The button turns off once nothing is highlighted; focus goes to Pick key words.
+  clear.addEventListener('click', () => keepFocus(() => setMarks('Clear highlights', () => []), () => pick));
   const tint = color(view, {
     label: 'Highlight color',
     get: (c) => c.style.highlightColor,
@@ -99,14 +100,14 @@ function highlightSection(view) {
     const shown = words.slice(0, 120);
     chips.replaceChildren(...shown.map((w, i) => {
       const b = h('button.mark-chip', { type: 'button', 'aria-pressed': String(marks.has(i)) }, w);
-      b.addEventListener('click', () => {
+      b.addEventListener('click', () => keepFocus(() => {
         setMarks(marks.has(i) ? 'Remove highlight' : 'Highlight word', (x) => {
           const m = new Set(x.marks || []);
           if (m.has(i)) m.delete(i);
           else m.add(i);
           return [...m].sort((a, z) => a - z);
         });
-      });
+      }, () => chips.children[i]));
       return b;
     }));
   };
@@ -351,14 +352,23 @@ function textColorField(view) {
     label: 'Color',
     value: current(view.clip),
     onInput: (v, final) => {
+      let off = false;
       view.edit('Text color', (c) => {
         if (hasColorKeys(c)) {
           const rgb = hexToRgb(v);
           const local = Math.round(view.store.time - c.start);
-          if (local < 0 || local > c.duration) return false;
+          if (local < 0 || local > c.duration) {
+            off = true;
+            return false;
+          }
           COLOR_KEYS.forEach((k, i) => setKey(c.keyframes, k, local, rgb[i], 'linear', view.tol()));
         } else c.style.color = v;
       }, { key: 'style-color', final });
+      if (!off) return;
+      // A keyed color only changes with the playhead over the clip: say so and show the color again.
+      view.actions.playheadHint();
+      const c = view.clip;
+      if (c) field.set(current(c), true);
     },
   });
   const kfBtn = h('button.icon-btn.small.kf-btn', { type: 'button', 'aria-pressed': 'false' }, icon('keyframe', 14));
@@ -376,12 +386,14 @@ function textColorField(view) {
     const has = keyIndexAt(c.keyframes, COLOR_KEYS[0], local, view.tol()) >= 0;
     view.edit(has ? 'Remove keyframe' : 'Add keyframe', (clip) => {
       const base = hexToRgb(clip.style.color);
+      // The color the removed key showed, kept when it was the last one.
+      const keyed = has ? textColorAt(clip, local) : null;
       COLOR_KEYS.forEach((k, i) => {
         if (has) removeKey(clip.keyframes, k, local, view.tol());
         else setKey(clip.keyframes, k, local, valueAt(clip.keyframes, k, local, base[i]), 'linear', view.tol());
       });
       // The last key gone: the color at that moment becomes the base color.
-      if (has && !hasColorKeys(clip)) clip.style.color = rgbToHex(...base);
+      if (has && !hasColorKeys(clip) && keyed) clip.style.color = keyed;
     });
     announce(has ? 'Keyframe removed' : 'Keyframe added');
   });
@@ -471,7 +483,7 @@ function basicPanel(view) {
       x.style.grad3 = v ? x.style.grad2 : '';
     }),
   });
-  const angle = slider(view, { label: 'Angle', min: -180, max: 180, unit: '°', get: (x) => Math.round(x.style.gradAngle), set: styleSetter(view, 'Gradient angle', 'gradAngle') });
+  const angle = slider(view, { label: 'Angle', min: -180, max: 180, hardMin: -360, hardMax: 360, unit: '°', get: (x) => Math.round(x.style.gradAngle), set: styleSetter(view, 'Gradient angle', 'gradAngle') });
   const fillOpacity = slider(view, { label: 'Fill opacity', min: 0, max: 100, unit: '%', get: (x) => Math.round((x.style.fillOpacity ?? 1) * 100), set: styleSetter(view, 'Fill opacity', 'fillOpacity', (v) => v / 100) });
   const thirdRow = row('Colors', third);
   view.bind(() => {
@@ -663,7 +675,7 @@ function basicPanel(view) {
     slider(view, { label: 'Opacity', min: 0, max: 100, unit: '%', get: (x) => Math.round(x.style.shadowOpacity * 100), set: styleSetter(view, 'Shadow opacity', 'shadowOpacity', (v) => v / 100) }).el,
     slider(view, { label: 'Blur', min: 0, max: 100, get: (x) => Math.round(x.style.shadowBlur), set: styleSetter(view, 'Shadow blur', 'shadowBlur') }).el,
     slider(view, { label: 'Distance', min: 0, max: 100, get: (x) => Math.round(x.style.shadowDistance), set: styleSetter(view, 'Shadow distance', 'shadowDistance') }).el,
-    slider(view, { label: 'Angle', min: -180, max: 180, unit: '°', get: (x) => Math.round(((x.style.shadowAngle + 180) % 360 + 360) % 360 - 180), set: styleSetter(view, 'Shadow angle', 'shadowAngle') }).el,
+    slider(view, { label: 'Angle', min: -180, max: 180, hardMin: -360, hardMax: 360, unit: '°', get: (x) => Math.round(((x.style.shadowAngle + 180) % 360 + 360) % 360 - 180), set: styleSetter(view, 'Shadow angle', 'shadowAngle') }).el,
   ]);
   const depth = toggledSection(view, '3D depth', {
     keys: ['extrudeColor', 'extrudeDepth', 'extrudeAngle'],
@@ -676,7 +688,7 @@ function basicPanel(view) {
   }, [
     color(view, { label: 'Depth color', get: (x) => x.style.extrudeColor, set: styleSetter(view, 'Depth color', 'extrudeColor') }).el,
     slider(view, { label: 'Depth', min: 0, max: 60, get: (x) => Math.round(x.style.extrudeDepth), set: styleSetter(view, 'Depth', 'extrudeDepth') }).el,
-    slider(view, { label: 'Angle', min: -180, max: 180, unit: '°', get: (x) => Math.round(((x.style.extrudeAngle + 180) % 360 + 360) % 360 - 180), set: styleSetter(view, 'Depth angle', 'extrudeAngle') }).el,
+    slider(view, { label: 'Angle', min: -180, max: 180, hardMin: -360, hardMax: 360, unit: '°', get: (x) => Math.round(((x.style.extrudeAngle + 180) % 360 + 360) % 360 - 180), set: styleSetter(view, 'Depth angle', 'extrudeAngle') }).el,
   ]);
   const split = toggledSection(view, 'Color split', {
     keys: ['glitch', 'glitchColorA', 'glitchColorB'],

@@ -174,6 +174,35 @@ describe('mobile chrome', () => {
     expect(mobile.sheets.details.side).toBe('bottom');
   });
 
+  it('a speed drag keeps the footage it began with when a neighbor cuts the clip short', () => {
+    const { root, ctx, store } = fakeEditor('phone');
+    const clip = store.project.tracks[0].clips[0];
+    // Stand-in for the timeline: the next clip at 5 s limits how long this one can get.
+    ctx.actions.setSpeed = vi.fn((id, v, { span } = {}) => {
+      const keep = span ?? clip.duration * clip.speed;
+      clip.speed = v;
+      clip.duration = Math.min(5e6, Math.round(keep / v));
+    });
+    store.select('v1');
+    root.querySelector('[data-tool="speed"]').click();
+    const range = document.querySelector('.tool-sheet input[type=range]');
+    for (const v of [0.7, 0.5, 0.7, 1]) {
+      range.value = String(v);
+      range.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    range.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(clip.speed).toBe(1);
+    expect(clip.duration).toBe(5e6);
+    // A new drag starts from what the clip shows now.
+    range.value = '0.5';
+    range.dispatchEvent(new Event('input', { bubbles: true }));
+    range.dispatchEvent(new Event('change', { bubbles: true }));
+    range.value = '1';
+    range.dispatchEvent(new Event('input', { bubbles: true }));
+    range.dispatchEvent(new Event('change', { bubbles: true }));
+    expect(clip.duration).toBe(2.5e6);
+  });
+
   it('follows the screen between phone, tablet and desktop', () => {
     const { root, ctx, mm, mobile } = fakeEditor('phone');
     mm.set('tablet');
@@ -200,6 +229,22 @@ describe('mobile chrome', () => {
     mm.set('phone');
     expect(root.dataset.layout).toBe('phone');
     expect(mobile.sheets.assets.body.contains(ctx.assets.el)).toBe(true);
+  });
+
+  it('uses the tablet layout on a desktop screen whose workspace is too narrow for both side panels', () => {
+    const { root, mm, mobile, ctx } = fakeEditor('desktop');
+    mobile.setNarrowWorkspace(true);
+    expect(root.dataset.layout).toBe('tablet');
+    expect(mobile.sheets.details.body.contains(ctx.inspector.el)).toBe(true);
+    mobile.setNarrowWorkspace(false);
+    expect(root.dataset.layout).toBe('desktop');
+    // Phones stay phones, and a forced layout wins.
+    mobile.setNarrowWorkspace(true);
+    mm.set('phone');
+    expect(root.dataset.layout).toBe('phone');
+    mm.set('desktop');
+    mobile.setMode('desktop');
+    expect(root.dataset.layout).toBe('desktop');
   });
 
   it('can be forced into a layout and releases its listeners on dispose', () => {

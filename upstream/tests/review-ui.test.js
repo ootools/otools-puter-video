@@ -2,6 +2,8 @@ import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { setup, publish, invite, USERS } from './review-helpers.js';
 import { fixture, clip, onMain, s } from './helpers.js';
 import { EditorStore } from '../src/model/store.js';
+import { addTimeline } from '../src/model/timelines.js';
+import { projectDuration } from '../src/model/timeline.js';
 import { createThreadList } from '../src/ui/review/threads.js';
 import { ReviewPage, cleanReviewHash } from '../src/ui/review/review-page.js';
 import { createReviewPanel, reviewMarkers } from '../src/ui/review/review-panel.js';
@@ -71,7 +73,7 @@ const fakeExport = (calls = []) => async (project, library, settings, opts) => {
   calls.push({ project, settings });
   opts.onProgress?.({ fraction: 0.5 });
   opts.onProgress?.({ fraction: 1 });
-  const dur = project.tracks.flatMap((t) => t.clips).reduce((m, c) => Math.max(m, c.start + c.duration), 0);
+  const dur = projectDuration(project);
   return { blob: new Blob([new Uint8Array(2048)], { type: 'video/mp4' }), duration: dur, width: 1280, height: 720, release: () => calls.push('released') };
 };
 const caps = async () => ({ video: ['avc'], audio: ['aac'], audioFormats: ['wav'] });
@@ -157,6 +159,8 @@ describe('share for review (owner flow)', () => {
     const p = projectWithClips();
     p.settings = { ...p.settings, width: 1920, height: 1080, fps: 25 };
     expect(reviewSettings(p)).toMatchObject({ ...REVIEW_PRESET, resolution: 720, fps: 25 });
+    // Where the browser cannot encode sound the copy is shared silent, not refused (there is no format to pick).
+    expect(reviewSettings(p).audioOptional).toBe(true);
     p.settings = { ...p.settings, width: 640, height: 360 };
     expect(reviewSettings(p).resolution).toBe(360);
     expect(reviewSettings(p, { video: ['vp9'] })).toMatchObject({ codec: 'vp9', format: 'webm' });
@@ -168,7 +172,7 @@ describe('share for review (owner flow)', () => {
     p.range = { in: s(2), out: s(6) };
     const r = reviewSource(p, 'range');
     expect(r.range).toEqual({ in: s(2), out: s(6) });
-    expect(r.project.tracks.flatMap((t) => t.clips)[0].duration).toBe(s(4));
+    expect(projectDuration(r.project)).toBe(s(4));
     expect(reviewSource(p, 'all').range).toBe(null);
   });
 
@@ -190,6 +194,17 @@ describe('share for review (owner flow)', () => {
     expect(r2.review.id).toBe(r1.review.id);
     expect(r2.version).toBe(2);
     expect(r2.review.versions[1]).toMatchObject({ range: { in: s(1), out: s(4) }, duration: s(3) });
+  });
+
+  it('publishes nothing when cancelled while the copy is being saved, and removes the saved copy', async () => {
+    const env = await setup();
+    const p = projectWithClips();
+    const ctl = new AbortController();
+    const deps = { exportProject: fakeExport(), detectCapabilities: caps };
+    const run = shareForReview({ puter: env.sdk.alice, project: p, library: null, title: 'Launch film', signal: ctl.signal, deps, onPhase: (ph) => ph === 'save' && ctl.abort() });
+    await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+    expect((await env.as('alice')('review.find', { projectId: p.id })).review).toBe(null);
+    expect([...env.world.storage.tables.get('files').keys()].filter((k) => k.includes('/reviews/'))).toEqual([]);
   });
 });
 
@@ -367,6 +382,57 @@ describe('review page (reviewer flow)', () => {
     page.dispose();
   });
 
+  it('toggles a focused checkbox with Space instead of playing', async () => {
+    const { page, root } = await opened();
+    const box = root.querySelector('#rv-show-resolved');
+    box.focus();
+    const e = new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true });
+    box.dispatchEvent(e);
+    expect(e.defaultPrevented).toBe(false);
+    expect(page.video.paused).toBe(true);
+    // Elsewhere Space still plays, and J/K/L work with the checkbox focused.
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true, cancelable: true }));
+    expect(page.video.paused).toBe(false);
+    page.video.pause();
+    page.seek(2_000_000);
+    box.dispatchEvent(new KeyboardEvent('keydown', { key: 'l', bubbles: true, cancelable: true }));
+    expect(page.t).toBe(2_040_000);
+    page.dispose();
+  });
+
+  it('gives a viewer made a commenter the comment box at once', async () => {
+    const { env, page, root, rid } = await opened('viewer');
+    page.seek(2_000_000);
+    await env.as('alice')('member.role', { review: rid, uuid: USERS.bob.uuid, role: 'commenter' });
+    await page.session.sync();
+    await until(() => page.session.role === 'commenter');
+    expect(root.querySelector('.rv-composer')?.hidden).toBe(false);
+    expect(root.querySelector('.rv-note').hidden).toBe(true);
+    expect(root.querySelector('.rv-pin-time').textContent).toBe('00:00:02:00');
+    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', bubbles: true }));
+    expect(document.activeElement).toBe(root.querySelector('.rv-composer textarea'));
+    // And back: a viewer again loses it.
+    await env.as('alice')('member.role', { review: rid, uuid: USERS.bob.uuid, role: 'viewer' });
+    await page.session.sync();
+    await until(() => page.session.role === 'viewer');
+    expect(root.querySelector('.rv-composer').hidden).toBe(true);
+    expect(root.querySelector('.rv-note').hidden).toBe(false);
+    page.dispose();
+  });
+
+  it('stops on the last frame with End and at the end of playback', async () => {
+    const { page, root } = await opened();
+    page.strip.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    expect(page.t).toBe(9_960_000);
+    expect(root.querySelector('.rv-timecode').textContent).toBe('00:00:09:24');
+    page.seek(0);
+    page.video._time = 10;
+    page.video._paused = false;
+    page.video.pause();
+    await until(() => page.t === 9_960_000);
+    page.dispose();
+  });
+
   it('offers a version picker and keeps comments with their version', async () => {
     const { env, page, root, rid } = await opened('commenter', { versions: 2 });
     const select = root.querySelector('.rv-version');
@@ -448,6 +514,43 @@ describe('editor review panel', () => {
     expect(panel.session.polling).toBe(true);
     panel.toggle(false);
     expect(panel.session.polling).toBe(false);
+    panel.dispose();
+  });
+
+  it('opens the timeline a version was shared from before seeking or adding markers', async () => {
+    const env = await setup();
+    const store = new EditorStore(projectWithClips());
+    const deps = { exportProject: fakeExport(), detectCapabilities: caps };
+    let short;
+    store.update('New timeline', (p) => {
+      short = addTimeline(p, { name: 'Short' });
+    });
+    const main = store.project.timelineId;
+    const v1 = await shareForReview({ puter: env.sdk.alice, project: store.project, library: null, title: 'Main', deps });
+    store.openTimeline(short);
+    store.update('clip', (p) => onMain(p, clip('video', 0, 6)));
+    store.update('range', (p) => (p.range = { in: s(2), out: s(5) }));
+    const v2 = await shareForReview({ puter: env.sdk.alice, project: store.project, library: null, scope: 'range', title: 'Short', deps });
+    expect(v2.review.id).toBe(v1.review.id);
+    expect(v2.review.versions.map((v) => v.timelineId)).toEqual([main, short]);
+    // Reviewers never see it.
+    await env.as('bob')('join', { review: v1.review.id, token: await invite(env, v1.review.id) });
+    expect((await env.as('bob')('review.get', { review: v1.review.id })).review.versions.some((v) => 'timelineId' in v)).toBe(false);
+    await env.as('bob')('comment.add', { review: v1.review.id, version: 2, id: 'c_short001', text: 'Tighter', t: s(1) });
+
+    store.openTimeline(main);
+    const panel = createReviewPanel({ store, library: { backend: { kind: 'puter' } }, puter: env.sdk.alice, account: {} }, { deps: { interval: 60_000 } });
+    document.body.append(panel.el);
+    panel.toggle(true);
+    await until(() => panel.el.querySelector('.rv-thread'));
+    panel.el.querySelector('.rv-time').click();
+    expect([store.project.timelineId, store.time]).toEqual([short, s(3)]);
+    store.openTimeline(main);
+    btn(panel.el, 'Add as markers').click();
+    expect(store.project.timelineId).toBe(short);
+    expect(store.project.markers.map((m) => m.time)).toEqual([s(3)]);
+    store.openTimeline(main);
+    expect(store.project.markers || []).toEqual([]);
     panel.dispose();
   });
 

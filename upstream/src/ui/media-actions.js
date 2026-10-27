@@ -7,6 +7,7 @@ import { h, announce } from '../lib/dom.js';
 import { icon } from '../lib/icons.js';
 import * as T from '../model/timeline.js';
 import { allClipsDeep } from '../model/compound.js';
+import { storedTimelineTracks } from '../model/timelines.js';
 import { openDialog, confirmDialog, toast } from './dialog.js';
 
 /** Assets no clip refers to (directly, or through a reversed copy in use). */
@@ -23,15 +24,50 @@ export function unusedAssets(project) {
   return Object.values(project.assets).filter((a) => !used.has(a.id));
 }
 
-/** Point every clip using oldId at a new asset and drop the old one. */
+/** An import error that says which file it is about (several files may be imported at once). */
+export function importErrorText(file, err) {
+  const msg = err?.message || `Couldn't import ${file.name || 'this file'}.`;
+  return file.name && !msg.includes(file.name) ? `${file.name}: ${msg}` : msg;
+}
+
+/** Audio clips playing an asset's sound (they can't use a photo). */
+function soundClips(project, assetId) {
+  return allClipsDeep(project).filter((c) => c.assetId === assetId && c.type === 'audio');
+}
+
+/**
+ * Point every clip using oldId at a new asset and drop the old one. A photo
+ * replacing a video turns its clips into photo clips (as Replace clip does)
+ * and removes the audio clips that played the video's sound.
+ */
 export function swapAsset(project, oldId, asset) {
   const old = project.assets[oldId];
   project.assets[asset.id] = { ...asset, ...(old?.folder ? { folder: old.folder } : {}) };
+  const toImage = asset.kind === 'image' && old?.kind !== 'image';
+  if (toImage && oldId !== asset.id) {
+    const sound = new Set(soundClips(project, oldId).map((c) => c.id));
+    if (sound.size) {
+      const strip = (tracks) => {
+        for (const t of tracks) {
+          t.clips = t.clips.filter((c) => !sound.has(c.id));
+          for (const c of t.clips) if (c.type === 'compound') strip(c.sequence.tracks);
+        }
+      };
+      strip(project.tracks);
+      for (const tracks of storedTimelineTracks(project)) strip(tracks);
+    }
+  }
   let n = 0;
   for (const c of allClipsDeep(project)) {
     if (c.assetId === oldId) {
       c.assetId = asset.id;
       if (c.name === old?.name) c.name = asset.name;
+      if (toImage && c.type === 'video') {
+        c.type = 'image';
+        c.in = 0;
+        c.freeze = false;
+        c.reversed = false;
+      }
       n++;
     }
   }
@@ -59,9 +95,19 @@ const ACCEPT = { video: 'video/*,.mkv,.mov,.m4v,.webm', audio: 'audio/*,.mp3,.wa
 
 export function createMediaActions(ctx) {
   const { store } = ctx;
+  /** Tell the media panel which files are missing. */
+  const markMissing = (list) => {
+    const media = ctx.media;
+    if (!media?.missing) return;
+    const next = new Set(list.map((x) => x.hash));
+    if (next.size === media.missing.size && [...next].every((x) => media.missing.has(x))) return;
+    media.missing = next;
+    media.emit?.('missing');
+  };
   const a = {
     async removeUnusedMedia() {
-      const list = unusedAssets(store.project);
+      // Inside a compound clip, media used anywhere in the project counts.
+      const list = unusedAssets(store.projectForSave ? store.projectForSave() : store.project);
       if (!list.length) {
         toast('Every item in the media library is used on the timeline.', { kind: 'info' });
         return 0;
@@ -73,6 +119,22 @@ export function createMediaActions(ctx) {
       }, { structural: false });
       announce(`${list.length} unused items removed`);
       return list.length;
+    },
+
+    /**
+     * The asset ids in ids that clips outside the compound clip being edited
+     * use: deleting them from inside would leave those clips without media.
+     */
+    usedOutsideCompound(ids) {
+      if (!store.nest?.length) return [];
+      const uses = (p) => {
+        const n = new Map();
+        for (const c of allClipsDeep(p)) if (c.assetId) n.set(c.assetId, (n.get(c.assetId) || 0) + 1);
+        return n;
+      };
+      const all = uses(store.projectForSave());
+      const here = uses(store.project);
+      return ids.filter((id) => (all.get(id) || 0) > (here.get(id) || 0));
     },
 
     /** Select every clip using an asset and jump to the first. */
@@ -97,13 +159,18 @@ export function createMediaActions(ctx) {
       try {
         asset = await ctx.library.importFile(file);
       } catch (err) {
-        toast(err?.message || `Couldn't open ${file.name}`, { kind: 'error' });
+        toast(importErrorText(file, err), { kind: 'error' });
         return null;
       }
       if (asset.kind !== old.kind && !(old.kind === 'video' && asset.kind === 'image')) {
         toast(`${file.name} is ${asset.kind === 'audio' ? 'an audio file' : asset.kind === 'image' ? 'a photo' : 'a video'}, not ${old.kind === 'audio' ? 'audio' : old.kind === 'image' ? 'a photo' : 'a video'}.`, { kind: 'error' });
         return null;
       }
+      // A photo can't play the video's sound: its audio clips go, after asking.
+      const sound = asset.kind === 'image' && old.kind === 'video' ? soundClips(store.projectForSave?.() || store.project, assetId).length : 0;
+      if (sound && !(await confirmDialog({ title: 'Replace with a photo?', message: `${sound} audio clip${sound === 1 ? '' : 's'} playing the sound of ${old.name} will be removed, since a photo has no sound.`, confirm: 'Replace', danger: true }))) return null;
+      // Clips outside the compound clip being edited use it too: switch them all.
+      if (a.usedOutsideCompound([assetId]).length) while (store.nest.length) store.closeCompound();
       let n = 0;
       store.update('Replace media file', (p) => {
         n = swapAsset(p, assetId, asset);
@@ -113,16 +180,37 @@ export function createMediaActions(ctx) {
       return asset;
     },
 
-    /** Check every asset's file and offer to relink the missing ones. */
-    async findMissingMedia() {
-      const missing = [];
-      for (const x of Object.values(store.project.assets)) {
-        try {
-          await ctx.library.mediaBlob(x);
-        } catch {
-          missing.push(x);
-        }
+    /**
+     * Find the project's media whose file is missing and mark it in the media
+     * panel. notify: say so with a way to relink (when a project opens).
+     * Resolves the number missing (0 when the check could not run).
+     */
+    async checkMissingMedia({ notify = false } = {}) {
+      const assets = Object.values(store.project.assets);
+      if (!assets.length) return 0;
+      let missing;
+      try {
+        missing = await ctx.library.missingMedia(assets);
+      } catch {
+        return 0;
       }
+      markMissing(missing);
+      const n = missing.length;
+      if (n && notify) toast(`${n} media file${n === 1 ? ' is' : 's are'} missing. Their clips show as black or silent.`, { kind: 'error', duration: 10000, action: { label: 'Find files', onClick: () => a.findMissingMedia() } });
+      return n;
+    },
+
+    /** Check every asset's file in storage and offer to relink the missing ones. */
+    async findMissingMedia() {
+      let missing;
+      try {
+        missing = await ctx.library.missingMedia(Object.values(store.project.assets));
+      } catch (err) {
+        console.error(err);
+        toast("Couldn't check the media files. Check your connection and try again.", { kind: 'error' });
+        return [];
+      }
+      markMissing(missing);
       if (!missing.length) {
         toast('All media files are present.', { kind: 'success' });
         return [];

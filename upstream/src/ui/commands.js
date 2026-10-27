@@ -4,7 +4,7 @@
  * always accurate.
  */
 import { matchShortcut } from '../lib/platform.js';
-import { US } from '../lib/time.js';
+import { US, frameIndex } from '../lib/time.js';
 import { editPoint, findClip } from '../model/timeline.js';
 import { isMulticam } from '../model/multicam.js';
 import { prefs, setPref } from './prefs.js';
@@ -20,7 +20,8 @@ export function createCommands(ctx) {
   const { store, actions } = ctx;
   const player = () => ctx.player;
   const timeline = () => ctx.timeline;
-  const step = (frames) => store.seek(store.time + Math.round((frames * US) / store.fps));
+  // From the frame on screen to the start of another, at the export's whole-microsecond frame times.
+  const step = (frames) => store.seek(Math.round(((frameIndex(store.time, store.fps) + frames) * US) / store.fps));
   const hasSel = () => store.selection.size > 0;
   const multicamSel = () => isMulticam(store.selected?.clip);
   const stepTimeline = (dir) => {
@@ -83,7 +84,7 @@ export function createCommands(ctx) {
     { id: 'splitScenes', label: 'Split at scene changes', group: 'Editing', keys: [], run: () => actions.splitScenes(), enabled: () => store.selected?.clip.type === 'video' },
     { id: 'removeSilences', label: 'Remove silences', group: 'Editing', keys: [], run: () => actions.removeSilences() },
     { id: 'dub', label: 'Dub into another language', group: 'Editing', keys: [], run: () => import('./dub-dialog.js').then((m) => m.openDubDialog(ctx)) },
-    { id: 'assistant', label: 'Edit assistant', group: 'Editing', keys: ['Mod+K'], run: () => ctx.assistant?.toggle() },
+    { id: 'assistant', label: 'AI assistant', group: 'Editing', keys: ['Mod+K'], run: () => ctx.assistant?.toggle() },
     { id: 'trackMotion', label: 'Track motion', group: 'Editing', keys: [], run: () => ctx.openTracking?.(), enabled: () => Boolean(store.selected && 'transform' in store.selected.clip) },
     { id: 'savePreset', label: 'Save clip as preset', group: 'Editing', keys: [], run: () => import('./clip-presets.js').then((m) => m.saveClipPreset(ctx)), enabled: () => Boolean(store.selected) },
     { id: 'managePresets', label: 'Manage clip presets', group: 'Editing', keys: [], run: () => import('./clip-presets.js').then((m) => m.managePresets(ctx)) },

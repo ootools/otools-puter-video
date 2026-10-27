@@ -54,7 +54,8 @@ export function sequenceLength(seq) {
 export function projectDuration(project) {
   let end = 0;
   for (const t of project.tracks) for (const c of t.clips) end = Math.max(end, clipEnd(c));
-  return end;
+  // An export slice (model/slice.js) stops where its range did, though clips may run on.
+  return project.end != null ? Math.min(end, project.end) : end;
 }
 
 /** Longest duration the clip can have given its source media and speed. */
@@ -235,6 +236,19 @@ function withRipple(project, opts, fn) {
   return result;
 }
 
+/**
+ * Call before changing a clip's length in place; the returned function then
+ * closes or opens the gap on the base track with ripple, overlays following.
+ */
+export function rippleResize(project, id, opts = {}) {
+  if (!opts.ripple || !findClip(project, id)?.track.main) return () => {};
+  const relink = opts.linkOverlays ? captureLinks(project) : null;
+  return () => {
+    compactMain(project);
+    relink?.();
+  };
+}
+
 /** Base-track index where a clip dropped at time t is inserted (nearest boundary). */
 export function mainInsertIndex(project, t, excludeId) {
   const clips = mainTrack(project).clips.filter((c) => c.id !== excludeId);
@@ -287,7 +301,13 @@ export function moveClip(project, id, target, opts = {}) {
   if (!found || found.track.locked) return false;
   const { clip, track: from } = found;
   const dt = target.start - clip.start;
-  const others = (opts.with || []).filter((x) => x !== id).map((x) => findClip(project, x)).filter((f) => f && !f.track.locked);
+  const withIds = new Set(opts.with || []);
+  withIds.delete(id);
+  const others = [];
+  for (const track of project.tracks) {
+    if (track.locked) continue;
+    for (const c of track.clips) if (withIds.has(c.id)) others.push({ clip: c, track });
+  }
   return withRipple(project, opts, () => {
     from.clips.splice(from.clips.indexOf(clip), 1);
     let dest = target.trackId ? findTrack(project, target.trackId) : from;
@@ -296,10 +316,8 @@ export function moveClip(project, id, target, opts = {}) {
     clip.start = Math.max(0, Math.round(target.start));
     // Grouped clips move first so they never block the primary clip.
     const moving = new Set([id, ...others.map((o) => o.clip.id)]);
-    for (const o of others) {
-      o.clip.start = Math.max(0, o.clip.start + dt);
-      sortTrack(o.track);
-    }
+    for (const o of others) o.clip.start = Math.max(0, o.clip.start + dt);
+    for (const t of new Set(others.map((o) => o.track))) sortTrack(t);
     if (dest.main && opts.ripple) {
       const index = mainInsertIndex(project, clip.start, clip.id);
       sortTrack(dest);
@@ -483,29 +501,56 @@ export function duplicateClip(project, id, opts = {}) {
   return addClip(project, copy, { trackId: found.track.id, ...opts }).clip;
 }
 
-/** Paste clipboard clips so the earliest starts at time t, keeping their relative layout. */
+/**
+ * Paste clipboard clips so the earliest starts at time t, keeping their
+ * relative layout. Base-track clips go in first, one after another; with
+ * ripple they land on the nearest cut, and the other clips follow them:
+ * an overlay keeps its place on the base clip it sat on.
+ */
 export function pasteClips(project, clips, t, opts = {}) {
   if (!clips.length) return [];
   const first = Math.min(...clips.map((c) => c.start));
-  const pasted = [];
   const copies = regroup(clips.filter((src) => !src.assetId || project.assets[src.assetId]).map((src) => ({ src, ...structuredClone(src) })));
-  for (const copy of copies) {
-    const { src, ...c } = copy;
-    c.id = uid('c');
-    c.start = Math.max(0, t + (src.start - first));
-    const isMainVideo = src._main && (c.type === 'video' || c.type === 'image');
-    pasted.push(addClip(project, c, { ...opts, main: isMainVideo }).clip);
+  const fresh = ({ src, _main, _track, ...c }) => ({ ...c, id: uid('c') });
+  // Copied from the base track (video, image, compound, avatar): back onto the base track.
+  const isBase = (copy) => copy.src._main && TRACK_KIND_FOR[copy.type] === 'video';
+  const want = (copy) => Math.max(0, t + (copy.src.start - first));
+  const placed = new Map();
+  const bases = copies.filter(isBase).sort((a, b) => a.src.start - b.src.start);
+  let shift = 0;
+  let prev = null;
+  for (const copy of bases) {
+    const c = fresh(copy);
+    c.start = prev && opts.ripple ? clipEnd(prev) : Math.max(0, want(copy) + shift);
+    const clip = addClip(project, c, { ...opts, main: true }).clip;
+    if (!prev) shift = clip.start - want(copy);
+    placed.set(copy, clip);
+    prev = clip;
   }
-  return pasted;
+  for (const copy of copies) {
+    if (isBase(copy)) continue;
+    const c = fresh(copy);
+    const audio = TRACK_KIND_FOR[c.type] === 'audio';
+    const host = bases.find((b) => copy.src.start >= b.src.start && copy.src.start < clipEnd(b.src) && (!audio || clipEnd(copy.src) <= clipEnd(b.src) + 1000));
+    c.start = host ? placed.get(host).start + (copy.src.start - host.src.start) : Math.max(0, want(copy) + shift);
+    // opts.keepTracks (duplicate): each copy on the track it was copied from, where there is room.
+    placed.set(copy, addClip(project, c, { ...opts, main: false, ...(opts.keepTracks && copy.src._track ? { trackId: copy.src._track } : {}) }).clip);
+  }
+  return copies.map((copy) => placed.get(copy));
 }
 
+/**
+ * Play a clip at a constant speed. opts.span overrides the source length to
+ * keep (a drag keeps the one it began with, so a neighbor that cut the clip
+ * short mid-drag doesn't shorten it for good).
+ */
 export function setSpeed(project, id, speed, opts = {}) {
   const found = findClip(project, id);
   if (!found || !isTimed(found.clip) || found.track.locked) return false;
   const { clip, track } = found;
   const s = Math.min(100, Math.max(0.1, speed));
   const curved = hasCurve(clip);
-  const span = curved ? sourceSpan(clip) : clip.duration * clip.speed;
+  const span = opts.span ?? (curved ? sourceSpan(clip) : clip.duration * clip.speed);
   const duration = fitDuration(track, clip, Math.max(MIN_CLIP, Math.round(span / s)), opts);
   const before = { ...clip };
   // Constant speed replaces a velocity ramp, accents included.
@@ -1093,14 +1138,47 @@ export function keyEaseAt(clip, t, tol = 0) {
 // ---- Removing a span of time ----------------------------------------------
 
 /**
+ * t moved onto a base-track clip edge less than MIN_CLIP away, so a cut near
+ * an edit point takes whole clips there instead of leaving a sliver.
+ */
+function snapToMainEdge(project, t) {
+  const main = mainTrack(project);
+  if (!main || main.locked) return t;
+  let best = t;
+  let gap = MIN_CLIP;
+  for (const c of main.clips) {
+    for (const e of [c.start, clipEnd(c)]) {
+      if (Math.abs(e - t) < gap) {
+        gap = Math.abs(e - t);
+        best = e;
+      }
+    }
+  }
+  return best;
+}
+
+/** Cut `cut` µs off the start or end of a clip (a piece too short to split off). */
+function shave(clip, edge, cut) {
+  if (edge === 'start') {
+    windowSource(clip, cut, clip.duration);
+    if (clip.keyframes) clip.keyframes = shiftKeyframes(clip.keyframes, -cut, clip.duration - cut);
+    clip.start += cut;
+  } else {
+    windowSource(clip, 0, clip.duration - cut);
+    if (clip.keyframes) clip.keyframes = shiftKeyframes(clip.keyframes, 0, clip.duration - cut);
+  }
+  clip.duration -= cut;
+}
+
+/**
  * Remove [a, b) from every unlocked track: clips crossing an edge are split,
  * the pieces inside go, and (with close = true) everything after b moves left
  * by b - a so the gap closes. Markers, the in/out range and the transcript
  * follow. Returns the number of clips removed or shortened.
  */
 export function removeRange(project, a, b, { close = true } = {}) {
-  const lo = Math.max(0, Math.round(Math.min(a, b)));
-  const hi = Math.round(Math.max(a, b));
+  const lo = snapToMainEdge(project, Math.max(0, Math.round(Math.min(a, b))));
+  const hi = snapToMainEdge(project, Math.round(Math.max(a, b)));
   const span = hi - lo;
   if (span < 1000) return 0;
   let changed = 0;
@@ -1113,8 +1191,16 @@ export function removeRange(project, a, b, { close = true } = {}) {
     for (const c of [...track.clips]) {
       if (c.start < hi && clipEnd(c) > hi && clipEnd(c) - hi >= MIN_CLIP && hi - c.start >= MIN_CLIP) splitClip(project, c.id, hi);
     }
+    // A clip that pokes into the range by less than MIN_CLIP could not be split:
+    // shave that sliver off. One that pokes out by less than that goes with the range.
+    for (const c of track.clips) {
+      if (c.start < lo && clipEnd(c) > lo && clipEnd(c) < hi + MIN_CLIP && lo - c.start >= MIN_CLIP) shave(c, 'end', clipEnd(c) - lo);
+      else if (c.start > lo - MIN_CLIP && c.start < hi && clipEnd(c) - hi >= MIN_CLIP) shave(c, 'start', hi - c.start);
+      else continue;
+      changed++;
+    }
     const before = track.clips.length;
-    track.clips = track.clips.filter((c) => !(c.start >= lo - 1 && clipEnd(c) <= hi + 1));
+    track.clips = track.clips.filter((c) => !(c.start > lo - MIN_CLIP && clipEnd(c) < hi + MIN_CLIP));
     changed += before - track.clips.length;
     if (close) {
       for (const c of track.clips) if (c.start >= hi - 1) c.start = Math.max(0, c.start - span);
@@ -1130,9 +1216,10 @@ export function removeRange(project, a, b, { close = true } = {}) {
       else delete project.range;
     }
     if (project.transcript?.words) {
+      // Words anchored to their media (a) follow it on their own (media/transcript.js).
       project.transcript.words = project.transcript.words
-        .filter((w) => w.end <= lo || w.start >= hi)
-        .map((w) => (w.start >= hi ? { ...w, start: w.start - span, end: w.end - span } : w));
+        .filter((w) => w.a || w.end <= lo || w.start >= hi)
+        .map((w) => (!w.a && w.start >= hi ? { ...w, start: w.start - span, end: w.end - span } : w));
     }
   }
   return changed;

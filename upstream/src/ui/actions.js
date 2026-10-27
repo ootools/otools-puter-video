@@ -16,11 +16,19 @@ import { toast, openDialog } from './dialog.js';
 import { createOrganizeActions } from './organize-actions.js';
 import { createSmartActions } from './smart-actions.js';
 import { createMulticamActions } from './multicam-actions.js';
-import { createMediaActions } from './media-actions.js';
+import { createMediaActions, importErrorText } from './media-actions.js';
 import { allClipsDeep, removeAssetClips } from '../model/compound.js';
 import { defaultLength } from './preferences-dialog.js';
 import { createClipEffectActions } from './clip-effects-actions.js';
 
+
+/** Copies of clips for the clipboard, marked with whether they were on the base track. */
+function clipBoard(project, ids) {
+  return ids
+    .map((id) => T.findClip(project, id))
+    .filter(Boolean)
+    .map(({ clip, track }) => ({ ...structuredClone(clip), _main: Boolean(track.main), _track: track.id }));
+}
 
 export function createActions(ctx) {
   const { store } = ctx;
@@ -28,6 +36,13 @@ export function createActions(ctx) {
 
   const sel = () => store.selectedIds;
   const at = () => store.time;
+  // Once per drag or run of edits, not on every step.
+  let hintAt = -Infinity;
+  const playheadHint = () => {
+    const now = performance.now();
+    if (now - hintAt > 4000) toast('Move the playhead over the clip to change a keyframed setting.', { kind: 'info' });
+    hintAt = now;
+  };
 
   function addClipAndSelect(label, clip, opts) {
     const ok = store.update(label, (p) => {
@@ -53,7 +68,7 @@ export function createActions(ctx) {
           assets.push(asset);
         } catch (err) {
           console.error(err);
-          toast(err?.message || `Couldn't import ${file.name}`, { kind: 'error' });
+          toast(importErrorText(file, err), { kind: 'error' });
         }
       }
       if (!assets.length) return [];
@@ -303,20 +318,29 @@ export function createActions(ctx) {
       }, { structural: false, ...opts });
     },
 
+    /** Say to move the playhead over the clip (a keyed edit off the clip); once per run of edits. */
+    playheadHint,
+
     /**
      * Set a keyframable property. When the clip already has keys for it, the
-     * value becomes a key at the playhead; otherwise the base value changes.
+     * value becomes a key at the playhead (which must be over the clip: the
+     * base value would change nothing that shows); otherwise the base value
+     * changes.
      */
     setAnimatable(id, prop, value, opts = {}) {
-      return actions.editClip(id, opts.label || 'Edit', (c) => {
+      let off = false;
+      const ok = actions.editClip(id, opts.label || 'Edit', (c) => {
         const local = Math.round(at() - c.start);
         const tol = Math.round(US / store.fps / 2);
-        if (c.keyframes?.[prop]?.length && local >= 0 && local <= c.duration) {
-          setKey(c.keyframes, prop, local, value, 'linear', tol);
-        } else {
-          setBaseValue(c, prop, value);
+        if (!c.keyframes?.[prop]?.length) setBaseValue(c, prop, value);
+        else if (local >= 0 && local <= c.duration) setKey(c.keyframes, prop, local, value, 'linear', tol);
+        else {
+          off = true;
+          return false;
         }
       }, opts);
+      if (off) playheadHint();
+      return ok;
     },
 
     /**
@@ -399,11 +423,14 @@ export function createActions(ctx) {
     },
 
     deleteLeft() {
-      const ok = store.update('Delete left', (p) => T.trimToPlayhead(p, at(), 'left', sel(), store.opts) > 0);
-      if (ok && store.toggles.ripple) {
+      const t = at();
+      // The trimmed clip: the selected one, or the base clip under the playhead.
+      const target = sel().length ? sel() : [T.mainTrack(store.project)?.clips.find((c) => c.start < t && T.clipEnd(c) > t)?.id];
+      const ok = store.update('Delete left', (p) => T.trimToPlayhead(p, t, 'left', sel(), store.opts) > 0);
+      if (ok && store.toggles.ripple && target.length === 1) {
         // The kept part now starts where the deleted part began.
-        const s = store.selected;
-        if (s) store.seek(s.clip.start);
+        const kept = T.findClip(store.project, target[0]);
+        if (kept) store.seek(kept.clip.start);
       }
     },
 
@@ -416,8 +443,15 @@ export function createActions(ctx) {
       if (!ids.length) return;
       const made = [];
       store.update('Duplicate', (p) => {
-        for (const id of ids) {
-          const c = T.duplicateClip(p, id, store.opts);
+        if (ids.length > 1) {
+          // Several clips are copied as a block right after them (after their
+          // base track clips, if any), keeping their layout and their groups.
+          const board = clipBoard(p, ids);
+          const base = board.filter((c) => c._main);
+          const end = Math.max(...(base.length ? base : board).map((c) => T.clipEnd(c)));
+          made.push(...T.pasteClips(p, board, end, { ...store.opts, keepTracks: true }).map((c) => c.id));
+        } else {
+          const c = T.duplicateClip(p, ids[0], store.opts);
           if (c) made.push(c.id);
         }
         return made.length > 0;
@@ -428,10 +462,7 @@ export function createActions(ctx) {
     copy() {
       const ids = sel();
       if (!ids.length) return false;
-      clipboard = ids
-        .map((id) => T.findClip(store.project, id))
-        .filter(Boolean)
-        .map(({ clip, track }) => ({ ...structuredClone(clip), _main: Boolean(track.main) }));
+      clipboard = clipBoard(store.project, ids);
       announce(clipboard.length === 1 ? 'Copied clip' : `Copied ${clipboard.length} clips`);
       return true;
     },
@@ -527,11 +558,12 @@ export function createActions(ctx) {
           }, { structural: false });
           store.history.undoStack.pop();
           target = store.project.assets[made.id];
-          d.close();
         } catch (err) {
-          d.close();
           if (err?.name !== 'AbortError') toast(err?.message || "Couldn't reverse this clip.", { kind: 'error' });
           return;
+        } finally {
+          // Also when the reversed file could not be saved (importFiles has said why).
+          d.close();
         }
       }
       actions.editClip(id, 'Reverse', (c) => {
@@ -586,8 +618,9 @@ export function createActions(ctx) {
       });
     },
 
-    setSpeed(id, speed) {
-      store.update('Change speed', (p) => T.setSpeed(p, id, speed, store.opts), { coalesce: `speed:${id}` });
+    /** span: the source length to keep (a drag keeps the one it began with). */
+    setSpeed(id, speed, { span } = {}) {
+      store.update('Change speed', (p) => T.setSpeed(p, id, speed, { ...store.opts, ...(span !== undefined ? { span } : {}) }), { coalesce: `speed:${id}` });
     },
 
     /**

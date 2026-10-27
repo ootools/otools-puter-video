@@ -110,10 +110,13 @@ export function videoBitrate({ width, height, fps, codec = 'avc', level = 'balan
   return Math.max(200_000, Math.round(bps / 1000) * 1000);
 }
 
-/** Number of output frames for a duration (a trailing partial frame counts). */
+/** Number of output frames for a duration: those whose time (frameTime) falls before its end, so a trailing partial frame counts. */
 export function frameCount(durationUs, fps) {
   if (durationUs <= 0) return 0;
-  return Math.max(1, Math.ceil((durationUs * fps) / US - 1e-6));
+  let n = Math.max(1, Math.ceil((durationUs * fps) / US - 1e-6));
+  // Frame times are rounded to whole microseconds: one may land on the end itself.
+  while (n > 1 && frameTime(n - 1, fps) >= durationUs) n--;
+  return n;
 }
 
 /** Timeline time (integer microseconds) of output frame i. */
@@ -301,7 +304,9 @@ class ClipFrames {
       this.cur = await this._pull();
       this.next = await this._pull();
     }
-    const eps = 1e-6;
+    // Timeline times are whole microseconds and a clip's speed multiplies their
+    // rounding (3x lands 1-2 us short of a frame); 0.1 ms is far below any frame interval.
+    const eps = 1e-4;
     while (this.next && this.next.timestamp <= sec + eps) {
       this.cur?.close();
       this.cur = this.next;
@@ -477,6 +482,7 @@ class FrameRenderer {
     const layers = evaluate(this.project, t);
     await this.media.prepare(layers);
     if (!this.compositor.render(layers, { settings: this.project.settings, time: t / US })) throw new Error('WebGL context lost while rendering');
+    this.text.sweep();
     await this.media.sweep();
   }
 
@@ -494,6 +500,8 @@ async function thumbnail(canvas, maxW = 360) {
   return createImageBitmap(canvas, { resizeWidth: w, resizeHeight: h, resizeQuality: 'medium' }).catch(() => null);
 }
 
+const PEOPLE_TOOLS_FAILED = "The people tools this video uses (background removal, retouch or body effects) couldn't load. Check your connection and try again.";
+
 /** Render one frame of the project at time t to an ImageBitmap (previews and thumbnails). */
 export async function renderStill(project, library, t = 0, { maxWidth = 640 } = {}) {
   const snap = structuredClone(project);
@@ -503,12 +511,87 @@ export async function renderStill(project, library, t = 0, { maxWidth = 640 } = 
   try {
     await preloadFonts(snap);
     await ensureLuts(snap, library).catch(() => {});
-    await ensureCutout(snap);
+    if (!(await ensureCutout(snap, { retry: true }))) throw new Error(PEOPLE_TOOLS_FAILED);
     await r.render(Math.max(0, t));
     return await createImageBitmap(r.canvas);
   } finally {
     await r.dispose();
   }
+}
+
+/* Encoder delay --------------------------------------------------------------- */
+
+const encoderDelays = new Map(); // `${codec}/${sampleRate}/${channels}` -> Promise<seconds>
+
+/**
+ * Silence an AAC encoder puts before the sound (priming, 2112 samples on
+ * macOS), in seconds. Measured once by encoding a click and decoding it
+ * again; the sound is then stamped this much earlier so the file's edit
+ * list trims the priming off and the sound lines up with the picture.
+ * Opus carries its own pre-skip, so other codecs get 0, as does a failed
+ * measurement.
+ */
+export function encoderDelay(codec, { sampleRate = 48000, numberOfChannels = 2 } = {}) {
+  if (codec !== 'aac' || typeof AudioEncoder === 'undefined' || typeof AudioDecoder === 'undefined') return Promise.resolve(0);
+  const key = `${codec}/${sampleRate}/${numberOfChannels}`;
+  let p = encoderDelays.get(key);
+  if (!p) {
+    p = measureDelay('mp4a.40.2', sampleRate, numberOfChannels).catch(() => 0);
+    encoderDelays.set(key, p);
+  }
+  return p;
+}
+
+async function measureDelay(codec, sampleRate, numberOfChannels) {
+  const frames = Math.round(sampleRate / 2);
+  const at = Math.round(sampleRate / 5);
+  const width = 48;
+  const chunks = [];
+  let config = null;
+  let failed = null;
+  const enc = new AudioEncoder({
+    output: (chunk, meta) => {
+      chunks.push(chunk);
+      if (meta?.decoderConfig) config = meta.decoderConfig;
+    },
+    error: (e) => (failed = e),
+  });
+  enc.configure({ codec, sampleRate, numberOfChannels, bitrate: AUDIO_BITRATE.aac });
+  const data = new Float32Array(frames * numberOfChannels);
+  for (let c = 0; c < numberOfChannels; c++) for (let i = 0; i < width; i++) data[c * frames + at + i] = 0.9 * Math.sin((i / width) * Math.PI);
+  const input = new AudioData({ format: 'f32-planar', sampleRate, numberOfFrames: frames, numberOfChannels, timestamp: 0, data });
+  enc.encode(input);
+  input.close();
+  await enc.flush();
+  enc.close();
+  if (failed || !config) throw failed || new Error('No decoder config');
+  let index = 0;
+  let peak = -1;
+  let best = 0;
+  const dec = new AudioDecoder({
+    output: (d) => {
+      const f = new Float32Array(d.numberOfFrames);
+      d.copyTo(f, { planeIndex: 0, format: 'f32-planar' });
+      for (let i = 0; i < f.length; i++) {
+        if (Math.abs(f[i]) > best) {
+          best = Math.abs(f[i]);
+          peak = index + i;
+        }
+      }
+      index += f.length;
+      d.close();
+    },
+    error: (e) => (failed = e),
+  });
+  dec.configure(config);
+  for (const c of chunks) dec.decode(c);
+  await dec.flush();
+  dec.close();
+  if (failed) throw failed;
+  const delay = peak - (at + width / 2);
+  // The click comes back where it went in, give or take a sample, plus the priming.
+  if (best < 0.3 || delay < -1 || delay > sampleRate / 4) return 0;
+  return Math.max(0, delay) / sampleRate;
 }
 
 /* Targets --------------------------------------------------------------------- */
@@ -607,9 +690,14 @@ async function exportVideo(project, library, s, duration, base, { onProgress, si
         break;
       }
     }
+    // Never drop the sound without saying so (the export dialog warns first). A copy made
+    // where there is no such choice (audioOptional: the review copy) goes without.
+    if (!audioCodec && !s.audioOptional) throw new Error(`This browser cannot encode sound for ${container.label}. Choose another format, or turn off Export audio.`);
   }
   const sampleRate = 48000;
   const totalSamples = Math.round((duration * sampleRate) / US);
+  // Sound is stamped early by the encoder's priming, which the edit list then trims (see encoderDelay).
+  const audioLead = audioCodec ? await encoderDelay(audioCodec, { sampleRate, numberOfChannels: 2 }) : 0;
   const estimated = estimateSize({ ...s, audio: false }, duration, { projW: project.settings.width, projH: project.settings.height });
   const sink = await openTarget(estimated, forceTarget);
   const fileTarget = sink.kind === 'file';
@@ -638,7 +726,7 @@ async function exportVideo(project, library, s, duration, base, { onProgress, si
     await output.start();
     await preloadFonts(project);
     await ensureLuts(project, library).catch(() => {});
-    await ensureCutout(project);
+    if (!(await ensureCutout(project, { retry: true }))) throw new Error(PEOPLE_TOOLS_FAILED);
 
     let audioAt = 0; // seconds of sound handed to the encoder
     let audioDone = !audioSource;
@@ -653,7 +741,7 @@ async function exportVideo(project, library, s, duration, base, { onProgress, si
         const { channels, frames } = r.value;
         const data = new Float32Array(frames * channels.length);
         channels.forEach((ch, c) => data.set(ch, c * frames));
-        const sample = new AudioSample({ data, format: 'f32-planar', numberOfChannels: channels.length, sampleRate, timestamp: audioAt });
+        const sample = new AudioSample({ data, format: 'f32-planar', numberOfChannels: channels.length, sampleRate, timestamp: audioAt - audioLead });
         await audioSource.add(sample);
         sample.close();
         audioAt += frames / sampleRate;
@@ -742,10 +830,11 @@ async function exportAudio(project, library, s, duration, base, { onProgress, si
     output.setMetadataTags({ title: s.name || project.name, date: new Date() });
     await output.start();
     let at = 0;
+    const lead = await encoderDelay(f.codec, { sampleRate, numberOfChannels: channels });
     for await (const chunk of mixChunks(project, library, { end: duration, sampleRate, channels, signal, onProgress: report })) {
       const data = new Float32Array(chunk.frames * channels);
       chunk.channels.forEach((ch, c) => data.set(ch, c * chunk.frames));
-      const sample = new AudioSample({ data, format: 'f32-planar', numberOfChannels: channels, sampleRate, timestamp: at });
+      const sample = new AudioSample({ data, format: 'f32-planar', numberOfChannels: channels, sampleRate, timestamp: at - lead });
       await source.add(sample);
       sample.close();
       at += chunk.frames / sampleRate;
@@ -770,9 +859,12 @@ export async function* renderFrames(project, library, { width, height, fps, star
   const snap = structuredClone(project);
   const stop = end ?? projectDuration(snap);
   const total = Math.max(1, frameCount(stop - start, fps));
+  // Imported .cube LUTs, as the video export and stills load them.
+  await ensureLuts(snap, library).catch(() => {});
   const r = new FrameRenderer(snap, library, even(width), even(height));
   try {
     await preloadFonts(snap);
+    if (!(await ensureCutout(snap, { retry: true }))) throw new Error(PEOPLE_TOOLS_FAILED);
     for (let i = 0; i < total; i++) {
       if (signal?.aborted) throw abortError();
       await r.render(Math.min(stop - 1, start + Math.round((i * US) / fps)));

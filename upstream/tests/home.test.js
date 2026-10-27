@@ -3,6 +3,7 @@ import { Library, TRASH_DAYS } from '../src/storage/library.js';
 import { memoryBackend } from '../src/storage/backends.js';
 import { Home, daysLeft, formatSize } from '../src/ui/home.js';
 import { TEMPLATES } from '../src/model/templates.js';
+import { setPref } from '../src/ui/prefs.js';
 
 const DAY = 24 * 60 * 60 * 1000;
 const settle = (ms = 30) => new Promise((r) => setTimeout(r, ms));
@@ -53,6 +54,29 @@ describe('home screen', () => {
     root.querySelector('.new-banner').click();
     [...root.querySelectorAll('.ratio-grid .quick-card')][1].click();
     expect(h.onCreate.mock.calls).toEqual([[{ ratio: 'original' }], [{ ratio: '9:16' }]]);
+  });
+
+  it('names template cards starting with their visible text', async () => {
+    mount(new Library(memoryBackend()));
+    await settle();
+    const cards = root.querySelectorAll('.tpl-strip .tpl-card');
+    expect(cards.length).toBeGreaterThan(0);
+    const words = (t) => t.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    for (const card of cards) {
+      const visible = [card.querySelector('.tpl-badge'), card.querySelector('.tpl-name'), card.querySelector('.tpl-sub')].map((e) => e.textContent).join(' ');
+      expect(words(card.getAttribute('aria-label')).startsWith(words(visible))).toBe(true);
+    }
+  });
+
+  it('names shape cards starting with their visible text', async () => {
+    mount(new Library(memoryBackend()));
+    await settle();
+    for (const card of root.querySelectorAll('.ratio-grid .quick-card')) {
+      const [label, hint] = [...card.querySelectorAll('.quick-text > *')].map((e) => e.textContent);
+      const name = card.getAttribute('aria-label') || `${label} ${hint}`;
+      expect(name.startsWith(hint ? `${label} ${hint}` : label)).toBe(true);
+      expect(name).toMatch(/new project/i);
+    }
   });
 
   it('moves a deleted project to the Trash, restores it and deletes it for good', async () => {
@@ -136,3 +160,32 @@ describe('home screen', () => {
     expect(daysLeft(now - 40 * DAY, now)).toBe(0);
   });
 });
+
+describe('home project list', () => {
+  afterEach(() => setPref('homeSort', null));
+
+  it('sorts by name the way people count', async () => {
+    const lib = new Library(memoryBackend());
+    for (const n of ['Project 10', 'project 2', 'Project 1', 'Álbum']) await lib.createProject({ name: n });
+    setPref('homeSort', 'name');
+    mount(lib);
+    await settle();
+    expect(titles()).toEqual(['Álbum', 'Project 1', 'project 2', 'Project 10']);
+  });
+
+  it('looks for a missing cover once, not on every search keystroke', async () => {
+    const lib = new Library(memoryBackend());
+    await lib.createProject({ name: 'No cover' });
+    const reads = vi.spyOn(lib, 'coverBlob');
+    mount(lib);
+    await settle();
+    const search = root.querySelector('.home-search');
+    for (const q of ['n', 'no', 'no ', 'no c']) {
+      search.value = q;
+      search.dispatchEvent(new Event('input'));
+      await settle(5);
+    }
+    expect(reads).toHaveBeenCalledTimes(1);
+  });
+});
+

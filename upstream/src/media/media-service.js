@@ -20,6 +20,7 @@ export class MediaService extends Emitter {
     this.queue = []; // { asset, times }
     this.busy = 0;
     this.proxies = null; // ProxyManager: thumbnails decode a ready proxy, which is faster
+    this.missing = new Set(); // hashes of media whose file is not in storage ('missing' event when it changes)
   }
 
   /** File to decode pictures from: the proxy when one is ready, else the original. */
@@ -193,5 +194,11 @@ export class MediaService extends Emitter {
     this.worker?.terminate();
     for (const strip of this.strips.values()) for (const v of strip.values()) v?.close?.();
     this.strips.clear();
+    // Posters still being made are closed when they arrive.
+    for (const entry of this.posters.values()) {
+      entry.value?.close?.();
+      if (!entry.value) entry.promise?.then((v) => v?.close?.());
+    }
+    this.posters.clear();
   }
 }

@@ -87,8 +87,9 @@ export const edits = [
   },
   {
     file: 'src/ui/topbar.js',
-    find: "h('div.topbar-right', layoutBtn, shortcutsBtn, account, shareBtn, exportBtn),",
-    replace: "h('div.topbar-right', layoutBtn, shortcutsBtn, account, exportBtn),",
+    // 上游后来在顶栏最左加了 AI 助手按钮（aiBtn），这里是按新顺序重写整行。
+    find: "h('div.topbar-right', aiBtn, layoutBtn, shortcutsBtn, account, shareBtn, exportBtn),",
+    replace: "h('div.topbar-right', aiBtn, layoutBtn, shortcutsBtn, account, exportBtn),",
     why: '顶栏不再放 Share 按钮',
   },
   {
@@ -101,20 +102,8 @@ export const edits = [
   },
 
   /* ================================================== 编辑器里残留的 Puter */
-  {
-    file: 'src/ui/editor.js',
-    find: `    // Inside the Puter desktop, save before the window closes.
-    if (typeof puter !== 'undefined' && puter.env === 'app' && puter.ui?.onWindowClose) {
-      puter.ui.onWindowClose(async () => {
-        await this.saver.flush().catch(() => {});
-        await library.flushUploads().catch(() => {});
-        puter.exit();
-      });
-    }
-`,
-    replace: '',
-    why: '只在 Puter 桌面壳里才有的窗口关闭钩子；插件没有这个概念（宿主自己管关闭）',
-  },
+  // 上游已自行删掉「Puter 桌面壳里关窗前保存」那段（`puter.ui.onWindowClose`），
+  // 移植层不再需要对应改动。
   {
     file: 'src/ui/editor.js',
     find: "        h('p', 'Projects and media are saved as files in your Puter cloud.'),\n        h('p', h('a', { href: 'https://developer.puter.com', target: '_blank', rel: 'noopener' }, 'Powered by Puter')),",
@@ -372,8 +361,8 @@ const canSaveLocally = () => hostReady();`,
   },
   {
     file: 'src/ui/export-dialog.js',
-    find: `  function finish() {`,
-    replace: `  async function finish() {`,
+    find: `  function finish(stopped = null) {`,
+    replace: `  async function finish(stopped = null) {`,
     why: 'download() 现在是异步的（宿主另存是异步对话框），完成流程要能 await',
   },
   {
@@ -631,8 +620,9 @@ export function currentExportParams() {
   },
   {
     file: 'src/engine/exporter.js',
-    find: "    await ensureCutout(project);",
-    replace: "    exportStage = '加载人像抠图模型';\n    await ensureCutout(project);",
+    // 上游改成带 retry 参数、并把失败转成统一的 PEOPLE_TOOLS_FAILED 报错。
+    find: "    if (!(await ensureCutout(project, { retry: true }))) throw new Error(PEOPLE_TOOLS_FAILED);",
+    replace: "    exportStage = '加载人像抠图模型';\n    if (!(await ensureCutout(project, { retry: true }))) throw new Error(PEOPLE_TOOLS_FAILED);",
     expect: 1,
     why: '导出卡住时说清停在哪一步：抠图模型（MediaPipe WASM，最容易在这一步静默挂住）',
   },
@@ -874,12 +864,36 @@ export function currentExportParams() {
   },
   {
     file: 'src/ui/export-dialog.js',
-    find: "    } catch (err) {\n      if (err?.name === 'AbortError') {\n        if (!dlg.el.isConnected) return;\n        announce('Export canceled');\n        backToSettings();\n        return;\n      }\n      console.error(err);\n      fail(err);\n    }",
-    replace: `    } catch (err) {
-      if (err?.name === 'AbortError') {
-        if (!dlg.el.isConnected) return;
+    // 上游重写了这段：取消/失败被统一成 canceled 判定，并且「已完成的文件仍要给出」。
+    // 移植层只做两件事：任何出口都清掉看门狗定时器；encoder-stalled 单独给诊断报错。
+    find: `    } catch (err) {
+      const canceled = err?.name === 'AbortError';
+      if (canceled && !dlg.el.isConnected) return;
+      if (!canceled) console.error(err);
+      // Files finished before the one that stopped are still offered.
+      if (results.length) {
+        finish({ canceled, message: canceled ? \`The \${jobName} was canceled.\` : \`The \${jobName} could not be exported. \${describeError(err, s)}\` });
+        return;
+      }
+      if (canceled) {
         announce('Export canceled');
-        if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+        backToSettings();
+        return;
+      }
+      fail(err);
+    }`,
+    replace: `    } catch (err) {
+      const canceled = err?.name === 'AbortError';
+      if (canceled && !dlg.el.isConnected) return;
+      if (!canceled) console.error(err);
+      if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
+      // Files finished before the one that stopped are still offered.
+      if (results.length) {
+        finish({ canceled, message: canceled ? \`The \${jobName} was canceled.\` : \`The \${jobName} could not be exported. \${describeError(err, s)}\` });
+        return;
+      }
+      if (canceled) {
+        announce('Export canceled');
         backToSettings();
         return;
       }
@@ -936,8 +950,6 @@ export function currentExportParams() {
         }
         return;
       }
-      console.error(err);
-      if (stallTimer) { clearInterval(stallTimer); stallTimer = null; }
       fail(err);
     }`,
     expect: 1,
@@ -1080,8 +1092,8 @@ export function needAiDialog(account, what) {
 
   {
     file: 'src/ui/topbar.js',
-    find: "import { promptDialog } from './dialog.js';\n",
-    replace: "import { promptDialog } from './dialog.js';\nimport { languageMenuItems } from '../otools/i18n.js';\n",
+    find: "import { promptDialog, toast } from './dialog.js';\n",
+    replace: "import { promptDialog, toast } from './dialog.js';\nimport { languageMenuItems } from '../otools/i18n.js';\n",
     why: '顶栏要用移植层的语言菜单',
   },
   {

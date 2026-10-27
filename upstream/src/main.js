@@ -12,9 +12,10 @@ import { Library } from './storage/library.js';
 import { puterBackend, opfsBackend, opfsAvailable, memoryBackend } from './storage/backends.js';
 import { Home } from './ui/home.js';
 import { importProjectBundle } from './storage/bundle.js';
-import { toast } from './ui/dialog.js';
+import { toast, confirmDialog } from './ui/dialog.js';
 import { loadDsp } from './media/dsp.js';
 import { parseReviewHash } from './review/protocol.js';
+import { confirmLeave, finishUploads } from './ui/leave.js';
 
 const root = document.getElementById('app');
 applyTheme();
@@ -23,6 +24,8 @@ loadDsp();
 let library = null;
 let account = null;
 let view = null;
+// Set once the user chose to leave the page (signing out, closing the window): no more questions.
+let leaving = false;
 
 function loading(text) {
   root.setAttribute('aria-busy', 'true');
@@ -63,10 +66,26 @@ async function openProject(id, files) {
     showHome();
     return;
   }
+  // Open in another tab too: edits in both would overwrite each other, so ask first.
+  const claim = await library.claimProject(id);
+  if (!claim.held) {
+    const ok = await confirmDialog({
+      title: 'Project open in another tab',
+      message: `${project.name} is already open in another tab or window. Changes made in both places overwrite each other. Open it here anyway?`,
+      confirm: 'Open anyway',
+      cancel: 'Go back',
+    });
+    if (!ok) {
+      claim.release();
+      showHome();
+      return;
+    }
+  }
   const { Editor } = await import('./ui/editor.js');
   view = new Editor(root, {
     library,
     project,
+    claim,
     account,
     onExit: () => showHome(),
     onNewProject: () => createProject({ ratio: 'original' }),
@@ -87,8 +106,7 @@ async function openProject(id, files) {
 async function createProject(opts = {}, files) {
   loading('Creating project...');
   try {
-    const n = (await library.listProjects()).length + 1;
-    const project = await library.createProject({ name: `Project ${n}`, ratio: opts.ratio || 'original' });
+    const project = await library.createProject({ name: await library.nextProjectName(), ratio: opts.ratio || 'original' });
     await openProject(project.id, files);
   } catch (err) {
     console.error(err);
@@ -131,13 +149,40 @@ async function startSignedIn(env) {
     env,
     picture: await profilePicture(),
     onSignOut: env === 'app' ? null : async () => {
-      await view?.saver?.flush?.();
+      if (!(await leavePage())) return;
       await puter.auth.signOut();
       location.hash = '';
       location.reload();
     },
   };
+  watchWindowClose();
   route();
+}
+
+/** Inside the Puter desktop: save (or ask) before the window closes, from any screen. */
+function watchWindowClose() {
+  if (typeof puter === 'undefined' || puter.env !== 'app' || !puter.ui?.onWindowClose) return;
+  puter.ui.onWindowClose(async () => {
+    if (await leavePage()) puter.exit();
+  });
+}
+
+/**
+ * The page is about to go away: save the open project and wait for media
+ * uploads, asking first when something couldn't be stored. Resolves false
+ * to stay.
+ */
+async function leavePage() {
+  if (leaving) return true;
+  if (view?.prepareToLeave) {
+    if (!(await view.prepareToLeave({ waitForUploads: true }))) return false;
+  } else {
+    const media = await finishUploads(library);
+    if (media && !(await confirmLeave(library, { media }))) return false;
+  }
+  leaving = true;
+  if (view) view.pageLeaving = true;
+  return true;
 }
 
 function startLocal(env) {
@@ -155,11 +200,20 @@ function startLocal(env) {
       }
     } : null,
   };
+  watchWindowClose();
   route();
 }
 
 /** A review link (#review=...): the focused review screen, for reviewers and the owner alike. */
 async function openReview(link) {
+  // A review link pasted over the editor: save first, and stay if the user wants to after a failed save.
+  if (view?.prepareToLeave) {
+    if (!(await view.prepareToLeave())) {
+      history.replaceState(null, '', `#project=${encodeURIComponent(view.store.project.id)}`);
+      return;
+    }
+    await view.saveCover?.();
+  }
   view?.dispose?.();
   loading('Opening review...');
   const { ReviewPage } = await import('./ui/review/review-page.js');
@@ -238,6 +292,13 @@ window.addEventListener('hashchange', () => {
   if (link && (view?.link?.review !== link.review || link.token)) openReview(link);
 });
 
+// Media still uploading (or waiting to be tried again) after leaving the editor: warn before the page closes.
+window.addEventListener('beforeunload', (e) => {
+  if (leaving || !library?.unsavedMedia) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
+
 window.addEventListener('unhandledrejection', (e) => {
   console.error(e.reason);
 });
@@ -254,6 +315,8 @@ if (import.meta.env.DEV) {
     get ctx() {
       return view?.ctx;
     },
+    // What signing out and closing the Puter window do before the page goes.
+    leavePage: () => leavePage(),
     async importDev(names, { add = false } = {}) {
       const files = [];
       for (const n of names) {

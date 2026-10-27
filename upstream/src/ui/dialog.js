@@ -86,8 +86,8 @@ export function promptDialog({ title, label, value = '', confirm = 'Save', maxLe
 let toastHost = null;
 
 export function toast(message, { kind = 'info', action, duration = 3800 } = {}) {
-  if (!toastHost) {
-    toastHost = h('div.toasts', { role: 'region', 'aria-label': 'Notifications' });
+  if (!toastHost?.isConnected) {
+    toastHost ||= h('div.toasts', { role: 'region', 'aria-label': 'Notifications' });
     document.body.append(toastHost);
   }
   const iconName = kind === 'error' ? 'alert' : kind === 'success' ? 'check' : 'info';
@@ -112,8 +112,26 @@ export function toast(message, { kind = 'info', action, duration = 3800 } = {}) 
   return { remove };
 }
 
-/* Tooltips: any element with data-tip gets a hover/focus tooltip. */
-export function installTooltips(root = document) {
+/*
+ * Tooltips: any element with data-tip gets a hover/focus tooltip. Installed once on the
+ * document, so the home screen, the editor and dialogs all get them. data-tip-key shows a
+ * fixed key; data-tip-cmd shows the key bound to that command when the tooltip opens.
+ */
+let tooltipsInstalled = false;
+let tipShortcut = null;
+
+/** Set how data-tip-cmd command ids become key labels; returns a function that unsets it. */
+export function setTooltipShortcuts(fn) {
+  tipShortcut = fn;
+  return () => {
+    if (tipShortcut === fn) tipShortcut = null;
+  };
+}
+
+export function installTooltips() {
+  if (tooltipsInstalled) return;
+  tooltipsInstalled = true;
+  const root = document;
   let tip = null;
   let timer = null;
   let current = null;
@@ -128,9 +146,11 @@ export function installTooltips(root = document) {
     if (!text) return;
     hide();
     current = el;
-    const kbd = el.getAttribute('data-tip-key');
+    const cmd = el.getAttribute('data-tip-cmd');
+    const kbd = (cmd && tipShortcut?.(cmd)) || el.getAttribute('data-tip-key');
     tip = h('div.tooltip', { role: 'tooltip' }, text, kbd ? h('span.tooltip-key', kbd) : null);
-    document.body.append(tip);
+    // A modal dialog is in the top layer, above anything in the page: put the tooltip in it.
+    (el.closest('dialog[open]') || document.body).append(tip);
     const r = el.getBoundingClientRect();
     const t = tip.getBoundingClientRect();
     let x = r.left + r.width / 2 - t.width / 2;

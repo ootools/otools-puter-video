@@ -13,7 +13,7 @@ import { icon, appIcon } from '../../lib/icons.js';
 import { ReviewSession } from '../../review/session.js';
 import { threadsFor, threadCounts, threadOf } from '../../review/comments.js';
 import { canComment, ROLE_LABELS, LIMITS, textProblem, workerURL } from '../../review/protocol.js';
-import { reviewFps, reviewTimecode, stepFrames, seekSeconds, fromSeconds, snapToFrame, stripMarkers, spokenAt, frameStart, frameAt } from '../../review/time.js';
+import { reviewFps, reviewTimecode, stepFrames, seekSeconds, fromSeconds, snapToFrame, stripMarkers, spokenAt, frameStart, frameAt, lastFrame } from '../../review/time.js';
 import { createThreadList, submitForm } from './threads.js';
 import { confirmDialog, toast } from '../dialog.js';
 
@@ -165,7 +165,9 @@ export class ReviewPage {
     const stage = h('section.rv-stage', { 'aria-label': 'Video' }, wrap, stripWrap, controls);
 
     /* Comments */
-    this.composer = canComment(s.role) ? this._buildComposer() : null;
+    // The comment box is made once the person can comment (also when a role is raised later).
+    this.composer = null;
+    this.viewerNote = h('p.rv-note', 'You can watch this review and read comments.');
     this.countEl = h('h2.rv-count');
     const resolvedId = 'rv-show-resolved';
     const showResolved = h('input', { type: 'checkbox', id: resolvedId, checked: this.showResolved });
@@ -185,12 +187,12 @@ export class ReviewPage {
     });
     this.syncNote = h('p.rv-sync', { role: 'status' });
     const side = h('aside.rv-side', { 'aria-label': 'Comments' },
-      this.composer?.el,
-      canComment(s.role) ? null : h('p.rv-note', 'You can watch this review and read comments.'),
+      this.viewerNote,
       h('div.rv-list-head', this.countEl, h('label.rv-toggle', { for: resolvedId }, showResolved, 'Show resolved')),
       this.threadList.el,
       this.syncNote);
 
+    this.side = side;
     this.el = h('div.rv-page', header, h('main#main.rv-body', { tabindex: '-1' }, stage, side));
     this.root.replaceChildren(this.el);
 
@@ -229,7 +231,14 @@ export class ReviewPage {
     }));
     this.versionSelect.value = String(this.version);
     this.versionSelect.hidden = r.versions.length < 2;
-    if (this.composer) this.composer.el.hidden = !canComment(s.role);
+    const can = canComment(s.role) && !this.el.classList.contains('rv-closed');
+    if (can && !this.composer) {
+      this.composer = this._buildComposer();
+      this.side.prepend(this.composer.el);
+      this.composer.follow();
+    }
+    if (this.composer) this.composer.el.hidden = !can;
+    this.viewerNote.hidden = canComment(s.role);
   }
 
   async setVersion(n, { force = false } = {}) {
@@ -298,11 +307,11 @@ export class ReviewPage {
     });
     on('pause', () => {
       this.renderPlay();
-      this.t = snapToFrame(fromSeconds(v.currentTime), this.fps);
+      this.t = this.frameTime(fromSeconds(v.currentTime));
       this.renderTime();
     });
     on('seeked', () => {
-      if (v.paused) this.t = snapToFrame(fromSeconds(v.currentTime), this.fps);
+      if (v.paused) this.t = this.frameTime(fromSeconds(v.currentTime));
       this.renderTime();
     });
     // A fallback while playing where frame callbacks are throttled (background tabs).
@@ -311,7 +320,11 @@ export class ReviewPage {
       this.t = fromSeconds(v.currentTime);
       this.renderTime();
     });
-    on('ended', () => this.renderPlay());
+    on('ended', () => {
+      this.renderPlay();
+      this.t = this.frameTime(this.t);
+      this.renderTime();
+    });
     on('error', () => {
       // An expired or revoked link: ask for the current one once.
       if (this._linkTries++ < 1) this.loadVideo({ fresh: true });
@@ -355,10 +368,14 @@ export class ReviewPage {
     });
   }
 
+  /** Start of the frame showing at time t, never past the last frame (the end of the video shows it). */
+  frameTime(t) {
+    return Math.min(snapToFrame(clamp(Math.round(t), 0, this.duration), this.fps), frameStart(lastFrame(this.duration, this.fps), this.fps));
+  }
+
   /** Show the frame at time t (microseconds). */
   seek(t) {
-    const target = clamp(Math.round(t), 0, this.duration);
-    this.t = snapToFrame(target, this.fps);
+    this.t = this.frameTime(t);
     if (this.video.readyState >= 1) this.video.currentTime = Math.min(seekSeconds(this.t, this.fps), Math.max(0, this.duration / 1e6 - 0.001));
     this.renderTime();
   }
@@ -566,12 +583,13 @@ export class ReviewPage {
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     const n = e.shiftKey ? 10 : 1;
     if (key === ' ') {
-      if (t.matches?.('button, a, [role=button]') && !t.closest('[data-space-plays]')) return;
+      // Space presses a focused control (a button, a checkbox...) instead of playing.
+      if (t.matches?.('button, a, input, summary, [role=button], [role=checkbox], [role=switch], [role=radio], [role=tab], [role=option], [role=menuitem]') && !t.closest('[data-space-plays]')) return;
       this.toggle();
     } else if (key === 'k') this.video.pause();
     else if (key === 'j' || (key === 'ArrowLeft' && !t.closest?.('[data-own-arrows]'))) this.step(-n);
     else if (key === 'l' || (key === 'ArrowRight' && !t.closest?.('[data-own-arrows]'))) this.step(n);
-    else if (key === 'c' && this.composer) {
+    else if (key === 'c' && this.composer && !this.composer.el.hidden) {
       this.video.pause();
       this.composer.startHere();
     } else return;

@@ -7,7 +7,7 @@
 import { h } from '../../lib/dom.js';
 import { icon } from '../../lib/icons.js';
 import { WHEELS, wheelVector, wheelHue, neutralWheel } from '../../model/color.js';
-import { slider, uidFor } from './common.js';
+import { slider, uidFor, keepFocus } from './common.js';
 import { gradeSection, editGrade } from './color-common.js';
 
 const wheelOf = (clip, id) => clip?.grade?.wheels?.[id] || neutralWheel();
@@ -102,8 +102,11 @@ function wheelCard(view, def) {
 
   const levelId = uidFor('level');
   const level = h('input.wheel-level', { type: 'range', id: levelId, min: -100, max: 100, step: 1, value: 0, 'aria-label': `${label} brightness` });
+  // Only an active drag holds the slider; a focused one follows undo.
   let levelDrag = false;
   level.addEventListener('pointerdown', () => (levelDrag = true));
+  level.addEventListener('pointerup', () => (levelDrag = false));
+  level.addEventListener('pointercancel', () => (levelDrag = false));
   level.addEventListener('input', () => set({ ...wheelOf(view.clip, def.id), l: Number(level.value) }, false, 'brightness'));
   level.addEventListener('change', () => {
     levelDrag = false;
@@ -113,7 +116,8 @@ function wheelCard(view, def) {
 
   const vals = ['R', 'G', 'B'].map((c) => h(`span.wheel-val.${c.toLowerCase()}`));
   const reset = h('button.icon-btn.small', { type: 'button', 'aria-label': `Reset ${label}`, 'data-tip': 'Reset' }, icon('rotateLeft', 13));
-  reset.addEventListener('click', () => set(neutralWheel(), true, 'reset'));
+  // The button turns off once the wheel is neutral; focus goes to the wheel.
+  reset.addEventListener('click', () => keepFocus(() => set(neutralWheel(), true, 'reset'), () => disk));
 
   const paint = () => {
     const w = wheelOf(view.clip, def.id);
@@ -122,7 +126,7 @@ function wheelCard(view, def) {
     const amount = Math.round(Math.min(1, Math.hypot(w.x, w.y)) * 100);
     disk.setAttribute('aria-valuenow', String(amount));
     disk.setAttribute('aria-valuetext', amount ? `hue ${Math.round(wheelHue(w))} degrees, strength ${amount} percent` : 'neutral');
-    if (!levelDrag && document.activeElement !== level) level.value = String(w.l);
+    if (!levelDrag) level.value = String(w.l);
     level.style.setProperty('--pct', `${(w.l + 100) / 2}%`);
     const v = wheelVector(def.id, w, 100);
     vals.forEach((el, i) => (el.textContent = `${v[i] >= 0 ? '+' : ''}${v[i].toFixed(2)}`));

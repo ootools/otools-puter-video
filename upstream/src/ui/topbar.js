@@ -6,7 +6,7 @@ import { h } from '../lib/dom.js';
 import { icon, appIcon } from '../lib/icons.js';
 import { menuButton } from './menu.js';
 import { getTheme, setTheme, prefs } from './prefs.js';
-import { promptDialog } from './dialog.js';
+import { promptDialog, toast } from './dialog.js';
 
 export function themeMenuItems() {
   const t = getTheme();
@@ -44,10 +44,25 @@ export function accountButton({ user, picture, env, onSignOut, onSignIn, extraIt
   return btn;
 }
 
+/** Give el a tooltip with its full text while it is cut off or shortened (.compact), else the fallback tooltip (if any). */
+function tipWhenCut(el, fallback = null, fullText = () => el.textContent) {
+  // pointerover reaches el before the document's tooltip listener reads data-tip.
+  const sync = () => {
+    const tip = el.scrollWidth > el.clientWidth || el.classList.contains('compact') ? fullText() : fallback;
+    if (tip) el.setAttribute('data-tip', tip);
+    else el.removeAttribute('data-tip');
+  };
+  el.addEventListener('pointerover', sync);
+  el.addEventListener('focus', sync);
+}
+
 export function createTopbar(ctx) {
   const { store, commands } = ctx;
   const status = h('span.save-status', { role: 'status', 'aria-live': 'polite' });
+  let statusText = '';
+  tipWhenCut(status, null, () => statusText);
   const nameBtn = h('button.project-name', { type: 'button', 'data-tip': 'Rename project' });
+  tipWhenCut(nameBtn, 'Rename project');
   const renderName = () => {
     nameBtn.textContent = store.project.name;
     nameBtn.setAttribute('aria-label', `Project name: ${store.project.name}. Rename`);
@@ -71,7 +86,7 @@ export function createTopbar(ctx) {
     cmd('import', { icon: 'import', label: 'Import media...' }),
     cmd('scriptToVideo', { icon: 'script', label: 'Script to video...' }),
     cmd('findHighlights', { icon: 'highlights', label: 'Find highlights...' }),
-    cmd('assistant', { icon: 'magic' }),
+    cmd('assistant', { icon: 'effects' }),
     cmd('export', { icon: 'export', label: 'Export...' }),
     cmd('shareReview', { icon: 'shareReview', label: 'Share for review...' }),
     cmd('reviewComments', { icon: 'comment', label: 'Review comments' }),
@@ -132,7 +147,7 @@ export function createTopbar(ctx) {
       cmd('multicam', { icon: 'multicam', label: 'Create multi-camera clip...' }),
       cmd('flattenMulticam', { icon: 'rows' }),
       'separator',
-      cmd('assistant', { icon: 'magic', checked: Boolean(ctx.assistant?.isOpen) }),
+      cmd('assistant', { icon: 'effects', checked: Boolean(ctx.assistant?.isOpen) }),
       cmd('splitScenes', { icon: 'scissors', label: 'Split at scene changes...' }),
       cmd('removeSilences', { icon: 'waveform', label: 'Remove silences...' }),
       cmd('syncBySound', { icon: 'waveform' }),
@@ -210,36 +225,66 @@ export function createTopbar(ctx) {
   const layoutBtn = h('button.icon-btn.layout-btn', { type: 'button', 'aria-label': 'Layout', 'data-tip': 'Layout' }, icon('layout', 18), icon('chevronDown', 12));
   menuButton(layoutBtn, layoutItems, { align: 'end', label: 'Layout' });
 
-  const exportBtn = h('button.btn.primary.export-btn', { type: 'button', 'data-tip': 'Export', 'data-tip-key': 'Ctrl+E' }, icon('export', 16), h('span', 'Export'));
+  const exportBtn = h('button.btn.primary.export-btn', { type: 'button', 'data-tip': 'Export', 'data-tip-cmd': 'export' }, icon('export', 16), h('span', 'Export'));
   exportBtn.addEventListener('click', () => ctx.openExport());
   const shareBtn = h('button.btn.share-btn', { type: 'button', 'data-tip': 'Share for review' }, icon('shareReview', 16), h('span', 'Share'));
   shareBtn.addEventListener('click', () => commands.run('shareReview'));
   const shortcutsBtn = h('button.icon-btn', { type: 'button', 'aria-label': 'Keyboard shortcuts', 'data-tip': 'Keyboard shortcuts' }, icon('keyboard', 18));
+  const aiBtn = h('button.icon-btn.ai-btn', { type: 'button', 'aria-label': 'AI assistant', 'aria-controls': 'ai-panel', 'data-tip': 'AI assistant', 'data-tip-cmd': 'assistant' }, icon('effects', 18));
+  aiBtn.addEventListener('click', () => commands.run('assistant'));
   shortcutsBtn.addEventListener('click', () => ctx.openShortcuts());
 
   const account = accountButton(ctx.account);
   const el = h('header.topbar', { role: 'banner' },
     h('div.topbar-left', menuBtn, menubar, status),
     h('div.topbar-center', nameBtn),
-    h('div.topbar-right', layoutBtn, shortcutsBtn, account, shareBtn, exportBtn),
+    h('div.topbar-right', aiBtn, layoutBtn, shortcutsBtn, account, shareBtn, exportBtn),
   );
 
   const fmt = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   const setStatus = ({ status: s, at }) => {
     const local = ctx.library.backend.kind === 'local';
     status.classList.toggle('error', s === 'error');
-    if (s === 'saving') status.textContent = 'Saving...';
-    else if (s === 'error') status.textContent = "Couldn't save. Retrying...";
-    else if (s === 'pending') status.textContent = 'Unsaved changes';
-    else status.textContent = `${local ? 'Saved in this browser' : 'Auto saved'}: ${fmt(at)}`;
+    if (s === 'saving') statusText = status.textContent = 'Saving...';
+    else if (s === 'error') statusText = status.textContent = "Couldn't save. Retrying...";
+    else if (s === 'pending') statusText = status.textContent = 'Unsaved changes';
+    else {
+      const where = local ? 'Saved in this browser' : 'Auto saved';
+      statusText = `${where}: ${fmt(at)}`;
+      status.replaceChildren(h('span.save-status-long', `${where}: `), h('span.save-status-short', { 'aria-hidden': 'true' }, 'Saved '), fmt(at));
+    }
+    fitStatus();
+    // Where the status has no room (phones, narrow tablets), a failed save still has to be seen.
+    if (s === 'error' && !errorNote && status.clientWidth < 40) errorNote = toast("Couldn't save your changes. Retrying...", { kind: 'error', duration: 8000 });
+    else if (s === 'saved' && errorNote) {
+      errorNote.remove();
+      errorNote = null;
+    }
   };
+  let errorNote = null;
+  // Say just "Saved" and the time only when the full status does not fit. The status's width
+  // does not depend on its text (contain: inline-size), so measuring here cannot loop.
+  const fitStatus = () => {
+    status.classList.remove('compact');
+    if (status.querySelector('.save-status-short') && status.scrollWidth > status.clientWidth) status.classList.add('compact');
+  };
+  const statusObserver = new ResizeObserver(fitStatus);
+  statusObserver.observe(status);
   ctx.saver.on('status', setStatus);
   setStatus({ status: 'saved', at: ctx.saver.lastSaved });
-  const uploads = h('span.upload-status');
-  ctx.library.on('uploads', ({ pending, error }) => {
-    uploads.textContent = pending ? `Uploading ${pending} file${pending === 1 ? '' : 's'}...` : '';
-    if (error) uploads.textContent = 'A media upload failed';
+  const uploads = h('span.upload-status', { role: 'status' });
+  // The library outlives the editor: stop listening when it closes.
+  const offUploads = ctx.library.on('uploads', ({ pending, failed }) => {
+    uploads.classList.toggle('error', Boolean(failed));
+    if (failed) uploads.textContent = `${failed} media file${failed === 1 ? '' : 's'} not uploaded. Retrying...`;
+    else uploads.textContent = pending ? `Uploading ${pending} file${pending === 1 ? '' : 's'}...` : '';
   });
   el.querySelector('.topbar-left').append(uploads);
-  return { el };
+  return {
+    el,
+    dispose() {
+      offUploads?.();
+      statusObserver.disconnect();
+    },
+  };
 }

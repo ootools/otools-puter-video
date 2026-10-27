@@ -5,27 +5,177 @@
  */
 import { US } from '../lib/time.js';
 import { marksForNamed } from '../model/text-marks.js';
+import { MIN_CLIP, clipEnd, sourceTimeAt } from '../model/timeline.js';
+import { localAtSource, sourceSpan } from '../model/speed-curve.js';
+import { audibleClips } from '../engine/scene.js';
+import { expandProject } from '../engine/compound.js';
 
-/** Hesitation sounds per language (lowercase, without punctuation). */
+// ---- Words that follow their media -----------------------------------------
+//
+// A transcript word remembers the media it was heard in: asset a, source
+// times s..e (µs). Its place on the timeline is worked out from the clips now
+// playing that part of the asset, so the transcript stays right through any
+// edit (trims, moves, ripple deletes, speed changes), and words whose media
+// was cut drop out. start/end keep the timeline times from when it was heard;
+// words without an anchor (older projects) are used as they are.
+
+/** Audible clips that can carry speech, base track first. */
+function speechClips(project) {
+  return audibleClips(project)
+    .filter(({ clip }) => !clip.freeze && clip.assetId)
+    .sort((x, y) => Number(Boolean(y.track.main)) - Number(Boolean(x.track.main)))
+    .map(({ clip }) => clip);
+}
+
+/**
+ * Clips that carry a media's sound, heard or not right now: muting, disabling
+ * or soloing another track only silences a clip, so its words stay. A video
+ * whose sound was detached is left to the audio clip that now carries it.
+ */
+function soundClips(project) {
+  const out = [];
+  for (const t of expandProject(project).tracks) {
+    for (const c of t.clips) if (c.assetId && !c.freeze && (c.type === 'audio' || (c.type === 'video' && !c.audioDetached))) out.push(c);
+  }
+  return out;
+}
+
+/** Anchor timeline words (µs) to the media heard under them in project. */
+export function anchorWords(project, words) {
+  const clips = speechClips(project);
+  return words.map((w) => {
+    const mid = (w.start + w.end) / 2;
+    const c = clips.find((x) => x.start <= mid && mid < clipEnd(x));
+    if (!c) return w;
+    return { ...w, a: c.assetId, s: Math.round(sourceTimeAt(c, w.start)), e: Math.round(sourceTimeAt(c, w.end)) };
+  });
+}
+
+const placeCache = new WeakMap(); // words array -> { key, out }
+
+/**
+ * The transcript's words where they now play on the timeline, sorted by
+ * time: [{ text, start, end }] in µs. Words whose media is no longer on the
+ * timeline are left out; media that plays twice gives its words twice.
+ */
+export function transcriptWords(project) {
+  const words = project?.transcript?.words;
+  if (!words?.length) return [];
+  if (!words.some((w) => w.a)) return words;
+  const clips = soundClips(project);
+  const key = clips.map((c) => `${c.assetId}:${c.start}:${c.duration}:${c.in}:${c.speed}:${c.speedCurve ? JSON.stringify(c.speedCurve) : ''}`).join('|');
+  const hit = placeCache.get(words);
+  if (hit?.key === key) return hit.out;
+  // Per media, its clips by source in point, each with the furthest source end
+  // so far, so a word finds the clips playing it by binary search.
+  const byAsset = new Map();
+  for (const c of clips) {
+    if (!byAsset.has(c.assetId)) byAsset.set(c.assetId, []);
+    byAsset.get(c.assetId).push({ c, from: c.in, to: c.in + sourceSpan(c) });
+  }
+  for (const list of byAsset.values()) {
+    list.sort((x, y) => x.from - y.from);
+    let reach = -Infinity;
+    for (const x of list) x.reach = reach = Math.max(reach, x.to);
+  }
+  const placed = [];
+  for (const w of words) {
+    if (!w.a) {
+      placed.push({ text: w.text, start: w.start, end: w.end });
+      continue;
+    }
+    const list = byAsset.get(w.a);
+    if (!list) continue;
+    const mid = (w.s + w.e) / 2;
+    // Last clip starting at or before mid, then back while an earlier one can still reach it.
+    let lo = 0;
+    let hi = list.length - 1;
+    while (lo <= hi) {
+      const m = (lo + hi) >> 1;
+      if (list[m].from <= mid) lo = m + 1;
+      else hi = m - 1;
+    }
+    for (let i = hi; i >= 0 && list[i].reach > mid; i--) {
+      const { c, from, to } = list[i];
+      if (mid >= to) continue;
+      const at = (src) => c.start + Math.round(localAtSource(c, Math.min(to - from, Math.max(0, src - from))));
+      const start = at(w.s);
+      placed.push({ text: w.text, start, end: Math.max(start, at(w.e)), a: w.a, s: w.s });
+    }
+  }
+  placed.sort((x, y) => x.start - y.start);
+  // The same words heard twice at once (two copies of a clip) show once.
+  const out = [];
+  for (const w of placed) {
+    let dup = false;
+    for (let i = out.length - 1; w.a && !dup && i >= 0 && out[i].start > w.start - MIN_CLIP; i--) dup = out[i].a === w.a && out[i].s === w.s;
+    if (!dup) out.push(w);
+  }
+  const clean = out.map(({ text, start, end }) => ({ text, start, end }));
+  placeCache.set(words, { key, out: clean });
+  return clean;
+}
+
+/**
+ * Hesitation sounds per language (lowercase, without punctuation). Only
+ * sounds that are never real words in that language, since they are cut.
+ */
 export const FILLERS = {
   en: ['um', 'umm', 'uh', 'uhh', 'uhm', 'er', 'erm', 'ah', 'ahh', 'hmm', 'hm', 'mm', 'mhm', 'eh'],
-  es: ['eh', 'em', 'este', 'pues', 'mmm'],
-  fr: ['euh', 'heu', 'bah', 'ben', 'hum'],
+  es: ['eh', 'em', 'mmm'],
+  fr: ['euh', 'heu', 'bah', 'hum'],
   de: ['äh', 'ähm', 'öh', 'hm', 'hmm'],
-  it: ['ehm', 'eh', 'cioè', 'mmm'],
-  pt: ['é', 'hum', 'ahn', 'tipo'],
+  it: ['ehm', 'eh', 'mmm'],
+  pt: ['hum', 'ahn'],
 };
 
-/** Phrases some people want gone too; only removed when asked. */
-export const SOFT_FILLERS = { en: ['like', 'you know', 'i mean', 'sort of', 'kind of', 'basically', 'actually', 'literally'] };
+/** Hesitations that are not words in any language above: used for every language. */
+const COMMON_FILLERS = ['uh', 'uhh', 'uhm', 'umm', 'erm', 'hmm', 'hm', 'mm', 'mhm'];
+
+/** Words that are also fillers in some sentences; only removed when asked. */
+export const SOFT_FILLERS = {
+  en: ['like', 'you know', 'i mean', 'sort of', 'kind of', 'basically', 'actually', 'literally'],
+  es: ['este', 'pues'],
+  fr: ['ben'],
+  it: ['cioè'],
+  pt: ['tipo'],
+};
 
 const clean = (t) => String(t).toLowerCase().replace(/[^\p{L}\p{N}'\s]+/gu, '').trim();
 
-/** Indices of filler words (and multi-word soft fillers when soft is on). */
+// Common little words of each language above that are not English words.
+const WORDS = {
+  en: ['the', 'and', 'is', 'to', 'of', 'you', 'that', 'it', 'this', 'we', 'what', 'for', 'with', 'are', 'have', 'they', 'be', 'not', 'just', 'my'],
+  de: ['der', 'das', 'und', 'ist', 'ich', 'nicht', 'ein', 'eine', 'sie', 'wir', 'mit', 'auf', 'für', 'zu', 'dem', 'von', 'sich', 'auch', 'wie', 'aber', 'dass'],
+  es: ['el', 'los', 'las', 'que', 'y', 'es', 'por', 'para', 'una', 'con', 'pero', 'muy', 'del', 'lo', 'como', 'está'],
+  fr: ['le', 'les', 'et', 'est', 'je', 'des', 'une', 'pas', 'vous', 'nous', 'ce', 'dans', 'qui', 'sur', 'avec', 'mais', "c'est"],
+  it: ['il', 'che', 'di', 'non', 'gli', 'sono', 'per', 'questo', 'della', 'è', 'una', 'con'],
+  pt: ['não', 'os', 'uma', 'com', 'mas', 'você', 'isso', 'então', 'muito', 'é', 'que', 'para'],
+};
+const LANG_OF = new Map();
+for (const [lang, list] of Object.entries(WORDS)) for (const w of list) LANG_OF.set(w, [...(LANG_OF.get(w) || []), lang]);
+
+/**
+ * The language a transcript of unknown language reads as, by its little
+ * words. English unless another language clearly shows (a short clip of
+ * "um, hello" has little to go on, and English is the most common).
+ */
+function guessLanguage(words) {
+  const score = {};
+  for (let i = 0; i < Math.min(words.length, 500); i++) for (const lang of LANG_OF.get(clean(words[i].text)) || []) score[lang] = (score[lang] || 0) + 1;
+  let best = 'en';
+  for (const [lang, n] of Object.entries(score)) if (n > (score[best] || 0)) best = lang;
+  return best;
+}
+
+/**
+ * Indices of filler words (and multi-word soft fillers when soft is on).
+ * language 'auto' uses the fillers of the language the words read as.
+ */
 export function findFillers(words, { language = 'en', soft = false } = {}) {
-  const lang = FILLERS[language] ? language : 'en';
-  const hard = new Set([...FILLERS[lang], ...(lang === 'en' ? [] : FILLERS.en)]);
-  const phrases = soft ? (SOFT_FILLERS[lang] || []).map((p) => p.split(' ')) : [];
+  const lang = language === 'auto' ? guessLanguage(words) : FILLERS[language] ? language : null;
+  const hard = new Set([...COMMON_FILLERS, ...(lang ? FILLERS[lang] : [])]);
+  const phrases = soft && lang ? (SOFT_FILLERS[lang] || []).map((p) => p.split(' ')) : [];
   const out = new Set();
   for (let i = 0; i < words.length; i++) {
     const w = clean(words[i].text);

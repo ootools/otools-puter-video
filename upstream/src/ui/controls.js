@@ -19,9 +19,14 @@ function pct(input) {
 /**
  * Slider + number box.
  *  onInput(value, final)  final is true on change/commit (end of drag, Enter)
+ *  read() -> the value now stored, shown after a typed or stepped value
+ *    (the setter may limit it further)
+ *  unchanged(v) -> true when committing v would change nothing, so a typed
+ *    or stepped value is skipped (no undo step); without it, always commits
  *  keyframe: { onToggle, onPrev, onNext } shows the diamond button group
+ * The number box keeps to the slider's range unless setLimits() widens it.
  */
-export function sliderField({ label, min = 0, max = 100, step = 1, value = 0, unit = '', decimals, onInput, keyframe, resetTo, wide = false }) {
+export function sliderField({ label, min = 0, max = 100, step = 1, value = 0, unit = '', decimals, onInput, read, unchanged, keyframe, resetTo, wide = false }) {
   const id = nextId('sl');
   const dec = decimals ?? (step < 1 ? Math.max(0, -Math.floor(Math.log10(step))) : 0);
   const range = h('input', { type: 'range', id, min, max, step, value, 'aria-label': label });
@@ -39,18 +44,30 @@ export function sliderField({ label, min = 0, max = 100, step = 1, value = 0, un
     emit(Number(range.value), false);
   });
   range.addEventListener('change', () => emit(Number(range.value), true));
+  // The slider's current range (it can change), or the wider limits from setLimits().
+  const limit = (v) => Math.min(Number(range.dataset.hardMax ?? range.max), Math.max(Number(range.dataset.hardMin ?? range.min), v));
+  const show = (v) => {
+    num.value = fmt(v);
+    range.value = String(v);
+    pct(range);
+  };
+  /**
+   * Commit a value from the number box, then show what was stored. A value
+   * that changes nothing (Enter again, an arrow at the end of the range) is no edit.
+   */
+  const commit = (v) => {
+    if (!unchanged?.(v)) emit(v, true);
+    const stored = read?.();
+    if (Number.isFinite(stored)) last = stored;
+    show(last);
+  };
   const commitNum = () => {
     const raw = parseFloat(num.value);
     if (!Number.isFinite(raw)) {
       num.value = fmt(last);
       return;
     }
-    // The number box accepts values outside the slider range where meaningful.
-    const v = Math.min(Number(range.dataset.hardMax ?? Infinity), Math.max(Number(range.dataset.hardMin ?? -Infinity), raw));
-    num.value = fmt(v);
-    range.value = String(v);
-    pct(range);
-    emit(v, true);
+    commit(limit(raw));
   };
   num.addEventListener('change', commitNum);
   num.addEventListener('keydown', (e) => {
@@ -60,11 +77,7 @@ export function sliderField({ label, min = 0, max = 100, step = 1, value = 0, un
     } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
       e.preventDefault();
       const delta = (e.key === 'ArrowUp' ? 1 : -1) * Number(step) * (e.shiftKey ? 10 : 1);
-      const v = Math.min(max, Math.max(min, last + delta));
-      num.value = fmt(v);
-      range.value = String(v);
-      pct(range);
-      emit(v, true);
+      commit(limit(Number((last + delta).toFixed(Math.max(dec, 6)))));
     }
   });
   let kf = null;
@@ -89,9 +102,10 @@ export function sliderField({ label, min = 0, max = 100, step = 1, value = 0, un
   return {
     el,
     input: range,
+    /** Show a stored value; a focused control keeps its text but steps from v. */
     set(v) {
-      if (document.activeElement === range || document.activeElement === num) return;
       last = Number(v);
+      if (document.activeElement === range || document.activeElement === num) return;
       range.value = String(v);
       num.value = fmt(v);
       pct(range);
@@ -134,8 +148,9 @@ export function colorField({ label, value = '#ffffff', onInput }) {
   const el = h('div.field.color-field', h('label.field-label', { for: id }, label), h('div.color-row', swatch, hex));
   return {
     el,
-    set(v) {
-      if (document.activeElement === hex) return;
+    /** Show v; force also replaces what is being typed in the hex box. */
+    set(v, force = false) {
+      if (document.activeElement === hex && !force) return;
       swatch.value = v;
       hex.value = v.toUpperCase();
     },
@@ -225,6 +240,31 @@ export function section(title, children, { open = true, actions = null } = {}) {
     body.hidden = !o;
   });
   return h('section.prop-section', h('div.section-head', h('h3.section-title', btn), actions), body);
+}
+
+/**
+ * Indexes of the tabs to show in a row avail px wide: as many as fit in
+ * order, with room kept for the More button (moreW) when some don't. The
+ * active tab always shows, taking the last place when it would not fit.
+ */
+export function fitTabs(widths, avail, moreW, active = 0, gap = 0) {
+  const total = widths.reduce((a, w) => a + w, 0) + gap * Math.max(0, widths.length - 1);
+  if (total <= avail + 0.5) return widths.map((_, i) => i);
+  const room = avail - moreW;
+  const shown = [];
+  let used = 0;
+  for (let i = 0; i < widths.length; i++) {
+    const w = widths[i] + (shown.length ? gap : 0);
+    if (used + w > room + 0.5) break;
+    shown.push(i);
+    used += w;
+  }
+  if (active >= 0 && !shown.includes(active)) {
+    // Drop tabs from the end until the active one fits.
+    while (shown.length && used + widths[active] + gap > room + 0.5) used -= widths[shown.pop()] + (shown.length ? gap : 0);
+    shown.push(active);
+  }
+  return shown;
 }
 
 /** Tab list with roving focus; returns { el, select(id) }. */

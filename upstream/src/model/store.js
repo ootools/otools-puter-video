@@ -14,8 +14,20 @@
  */
 import { Emitter } from '../lib/emitter.js';
 import { History } from './history.js';
-import { projectDuration, findClip, pruneTracks, cleanupTransitions, resolveOverlaps, MIN_CLIP, sequenceLength } from './timeline.js';
+import { projectDuration, findClip, pruneTracks, cleanupTransitions, resolveOverlaps, MIN_CLIP, sequenceLength, rippleResize } from './timeline.js';
 import { switchTimeline } from './timelines.js';
+
+/** Projects up to this much JSON keep a copy to roll back a failed step of a drag to. */
+const ROLLBACK_MAX = 1_000_000;
+
+/** Fields a compound clip being edited has of its own; the rest (name, media, settings...) is the project's. */
+const NEST_FIELDS = new Set(['tracks', 'markers', 'range', 'transcript', 'guides']);
+
+/** Copy the project-wide fields of from onto to (a compound clip's edits to media, name or settings). */
+function adoptProjectFields(to, from) {
+  for (const k of Object.keys(to)) if (!NEST_FIELDS.has(k) && !Object.hasOwn(from, k)) delete to[k];
+  for (const k of Object.keys(from)) if (!NEST_FIELDS.has(k)) to[k] = structuredClone(from[k]);
+}
 
 export class EditorStore extends Emitter {
   constructor(project, { toggles } = {}) {
@@ -60,7 +72,8 @@ export class EditorStore extends Emitter {
 
   /**
    * Edit a compound clip's own timeline: the editor switches to its tracks
-   * (sharing the project's media and settings) with a history of its own.
+   * with a history of its own. It gets a copy of the project's media and
+   * settings; changes to them go back to the project when it closes.
    */
   openCompound(id) {
     const f = findClip(this.project, id);
@@ -68,10 +81,9 @@ export class EditorStore extends Emitter {
     const outer = this.project;
     const c = f.clip;
     this.nest.push({ outer, history: this.history, id, time: this.time });
-    this.project = { ...outer, tracks: structuredClone(c.sequence.tracks), markers: [], range: undefined, transcript: undefined, guides: undefined };
-    delete this.project.range;
-    delete this.project.transcript;
-    delete this.project.guides;
+    const inner = { tracks: structuredClone(c.sequence.tracks), markers: [] };
+    adoptProjectFields(inner, outer);
+    this.project = inner;
     this.history = new History();
     this._afterSwap(Math.max(0, this.time - c.start + c.in));
     return true;
@@ -92,10 +104,13 @@ export class EditorStore extends Emitter {
       this.update('Edit compound clip', (p) => {
         const cc = findClip(p, frame.id)?.clip;
         if (!cc) return false;
+        const ripple = rippleResize(p, frame.id, this.opts);
         cc.sequence = { tracks: structuredClone(inner.tracks) };
+        adoptProjectFields(p, inner);
         const len = sequenceLength(cc.sequence);
         cc.in = Math.min(cc.in, Math.max(0, len - MIN_CLIP));
         cc.duration = Math.max(MIN_CLIP, Math.min(cc.duration, len - cc.in));
+        ripple();
       });
     }
     this._afterSwap(t);
@@ -110,6 +125,7 @@ export class EditorStore extends Emitter {
       const outer = structuredClone(this.nest[i].outer);
       const c = findClip(outer, this.nest[i].id)?.clip;
       if (c) c.sequence = { tracks: structuredClone(inner.tracks) };
+      adoptProjectFields(outer, inner);
       inner = outer;
     }
     return inner;
@@ -149,15 +165,27 @@ export class EditorStore extends Emitter {
     const now = performance.now();
     const merge = opts.coalesce && this._coalesce && this._coalesce.key === opts.coalesce && now - this._coalesce.at < 1200;
     const before = merge ? null : structuredClone(this.project);
+    // A merged step records no snapshot, but still needs one to roll back to (JSON is the cheap
+    // copy). Copying a very big project on every step of a drag would slow the drag down, so
+    // its size is checked once per run and big projects go without.
+    let rollback = null;
+    if (merge && this._coalesce.small !== false) {
+      rollback = JSON.stringify(this.project);
+      this._coalesce.small ??= rollback.length <= ROLLBACK_MAX;
+    }
+    // A cancelled edit is undone in place, so views holding the project, its tracks or clips stay valid.
+    const cancel = () => {
+      if (before || rollback) restoreInto(this.project, before || JSON.parse(rollback));
+    };
     let result;
     try {
       result = fn(this.project);
     } catch (err) {
-      if (before) this.project = before;
+      cancel();
       throw err;
     }
     if (result === false) {
-      if (before) this.project = before;
+      cancel();
       return false;
     }
     if (opts.structural !== false) {
@@ -168,7 +196,7 @@ export class EditorStore extends Emitter {
       }
     }
     if (before) this.history.push(before, label);
-    this._coalesce = opts.coalesce ? { key: opts.coalesce, at: now } : null;
+    this._coalesce = !opts.coalesce ? null : merge ? Object.assign(this._coalesce, { at: now }) : { key: opts.coalesce, at: now };
     this.project.modified = Date.now();
     this.revision++;
     // Drop selected ids that no longer exist.
@@ -199,18 +227,25 @@ export class EditorStore extends Emitter {
     return entry;
   }
 
-  undo() {
-    const entry = this.history.undo(structuredClone(this.project));
-    if (!entry) return null;
-    this.project = entry.snapshot;
-    this._afterRestore(entry.label);
-    return entry.label;
+  /** Undo one step, or several at once (views hear about it once). Returns the last step's label. */
+  undo(steps = 1) {
+    return this._travel('undo', steps);
   }
 
-  redo() {
-    const entry = this.history.redo(structuredClone(this.project));
+  redo(steps = 1) {
+    return this._travel('redo', steps);
+  }
+
+  _travel(dir, steps) {
+    let entry = null;
+    for (let i = 0; i < steps; i++) {
+      // Only the live project needs a copy; a step's snapshot passes straight to the other stack.
+      const next = this.history[dir](entry ? this.project : structuredClone(this.project));
+      if (!next) break;
+      entry = next;
+      this.project = entry.snapshot;
+    }
     if (!entry) return null;
-    this.project = entry.snapshot;
     this._afterRestore(entry.label);
     return entry.label;
   }
@@ -226,7 +261,12 @@ export class EditorStore extends Emitter {
 
   /** Forget selected clips and the selected transition when they no longer exist. */
   _dropStaleSelection() {
-    for (const id of this.selection) if (!findClip(this.project, id)) this.selection.delete(id);
+    if (this.selection.size > 1) {
+      // One pass for big selections instead of a search per id.
+      const live = new Set();
+      for (const t of this.project.tracks) for (const c of t.clips) live.add(c.id);
+      for (const id of this.selection) if (!live.has(id)) this.selection.delete(id);
+    } else for (const id of this.selection) if (!findClip(this.project, id)) this.selection.delete(id);
     if (this.transition && !findClip(this.project, this.transition)?.clip.transition) this.transition = null;
   }
 
@@ -296,4 +336,38 @@ export class EditorStore extends Emitter {
     this.toggles[name] = value;
     this.emit('toggles', { name, value });
   }
+}
+
+const isObject = (v) => v !== null && typeof v === 'object';
+
+/**
+ * Make target's contents equal to src's while keeping target's objects:
+ * array items are matched by id (or by position), so the project, its
+ * tracks and its clips keep their identity. src's own objects are used for
+ * anything target no longer has.
+ */
+function restoreInto(target, src) {
+  if (Array.isArray(src)) {
+    const byId = new Map();
+    for (const x of target) if (isObject(x) && x.id !== undefined) byId.set(x.id, x);
+    const next = src.map((v, i) => {
+      const cur = isObject(v) && v.id !== undefined ? byId.get(v.id) : target[i];
+      return restoreValue(cur, v);
+    });
+    target.length = next.length;
+    for (let i = 0; i < next.length; i++) target[i] = next[i];
+    return;
+  }
+  for (const k of Object.keys(target)) if (!(k in src)) delete target[k];
+  for (const k of Object.keys(src)) {
+    const v = restoreValue(target[k], src[k]);
+    if (target[k] !== v) target[k] = v;
+  }
+}
+
+function restoreValue(cur, src) {
+  const plain = (v) => Array.isArray(v) || Object.getPrototypeOf(v) === Object.prototype;
+  if (!isObject(src) || !isObject(cur) || !plain(src) || Array.isArray(cur) !== Array.isArray(src) || !plain(cur)) return src;
+  restoreInto(cur, src);
+  return cur;
 }

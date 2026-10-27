@@ -66,6 +66,7 @@ export function createTimeline(ctx) {
   let rows = [];
   let drag = null;
   let renderQueued = false;
+  let contentH = 0; // laid-out height of the tracks area, kept so the playhead never forces a layout
   let canvasQueued = false;
   let activeId = null; // roving focus clip
   const clipEls = new Map();
@@ -75,8 +76,7 @@ export function createTimeline(ctx) {
 
   // ---- Toolbar -----------------------------------------------------------
   const tb = (iconName, label, cmd, extra = {}) => {
-    const key = cmd ? ctx.commands.keyFor(cmd) : '';
-    const b = h('button.icon-btn', { type: 'button', 'aria-label': label, 'data-tip': label, 'data-tip-key': key ? shortcutLabel(key) : null, 'data-cmd': cmd || null, 'data-icon': iconName, ...extra }, icon(iconName, 18));
+    const b = h('button.icon-btn', { type: 'button', 'aria-label': label, 'data-tip': label, 'data-tip-cmd': cmd || null, 'data-cmd': cmd || null, 'data-icon': iconName, ...extra }, icon(iconName, 18));
     if (cmd) b.addEventListener('click', () => ctx.commands.run(cmd));
     return b;
   };
@@ -221,6 +221,12 @@ export function createTimeline(ctx) {
   function zoomToFit() {
     const vw = Math.max(200, scroller.clientWidth - headerWidth() - PAD * 2 - 40);
     const d = Math.max(store.duration, 10 * US);
+    if (centered) {
+      // Scrolling seeks here, so the view stays on the playhead.
+      setPps(vw / (d / US));
+      centerOn(store.time);
+      return;
+    }
     setPps(vw / (d / US), { time: 0, px: PAD });
     scroller.scrollLeft = 0;
   }
@@ -367,6 +373,7 @@ export function createTimeline(ctx) {
   function render(force = false) {
     renderQueued = false;
     const totalH = computeRows();
+    contentH = totalH;
     const dur = store.duration;
     const vw = scroller.clientWidth;
     const width = Math.max(vw, timeToX(dur) + Math.max(vw * 0.6, 300));
@@ -377,6 +384,7 @@ export function createTimeline(ctx) {
     renderHeaders(totalH);
     const [t0, t1] = visibleRange();
     const keep = new Set();
+    const live = new Set();
     multicams = [];
     const fps = store.fps;
     // Track rows (lanes).
@@ -398,6 +406,7 @@ export function createTimeline(ctx) {
       lane.classList.toggle('locked', row.track.locked);
       lane.classList.toggle('hidden-track', row.track.hidden);
       for (const clip of row.track.clips) {
+        live.add(clip.id);
         const visible = T.clipEnd(clip) >= t0 && clip.start <= t1;
         if (!visible && !store.selection.has(clip.id) && clip.id !== activeId) continue;
         keep.add(clip.id);
@@ -405,9 +414,13 @@ export function createTimeline(ctx) {
         if (e.node.parentNode !== lane) lane.append(e.node);
         const x = timeToX(clip.start);
         const w = Math.max(2, (clip.duration / US) * pps);
-        e.node.style.transform = `translateX(${x}px)`;
-        e.node.style.width = `${w}px`;
-        e.node.className = `tl-clip type-${clip.type}${store.selection.has(clip.id) ? ' selected' : ''}${row.track.locked ? ' locked' : ''}${w < 40 ? ' narrow' : ''}${clip.caption ? ' caption' : ''}${clip.disabled ? ' disabled' : ''}${clip.group ? ' grouped' : ''}${clip.label ? ' labeled' : ''}`;
+        // Clips being dragged or trimmed keep their preview position.
+        const held = drag?.cls && drag.ids.has(clip.id);
+        if (!held) {
+          e.node.style.transform = `translateX(${x}px)`;
+          e.node.style.width = `${w}px`;
+        }
+        e.node.className = `tl-clip type-${clip.type}${store.selection.has(clip.id) ? ' selected' : ''}${row.track.locked ? ' locked' : ''}${w < 40 ? ' narrow' : ''}${clip.caption ? ' caption' : ''}${clip.disabled ? ' disabled' : ''}${clip.group ? ' grouped' : ''}${clip.label ? ' labeled' : ''}${held ? ` ${drag.cls}` : ''}`;
         if (clip.label) e.node.style.setProperty('--clip-tag', LABEL_COLORS[clip.label]);
         else e.node.style.removeProperty('--clip-tag');
         e.node.setAttribute('aria-selected', String(store.selection.has(clip.id)));
@@ -443,16 +456,16 @@ export function createTimeline(ctx) {
     for (const [id, e] of clipEls) {
       if (!keep.has(id)) {
         e.node.remove();
-        if (!T.findClip(store.project, id)) clipEls.delete(id);
+        if (!live.has(id)) clipEls.delete(id);
       }
     }
-    renderTransitions();
+    renderTransitions(t0, t1);
     const range = store.project.range;
     rangeEl.hidden = !range;
     if (range) Object.assign(rangeEl.style, { left: `${timeToX(range.in)}px`, width: `${Math.max(1, timeToX(range.out) - timeToX(range.in))}px` });
     placePlayhead();
     drawRulerNow();
-    emptyHint.hidden = T.allClips(store.project).length > 0;
+    emptyHint.hidden = live.size > 0;
     ruler.setAttribute('aria-valuemax', String(Math.round(dur / US)));
     queueCanvases();
     notifyView();
@@ -488,7 +501,8 @@ export function createTimeline(ctx) {
     e.cuts.replaceChildren(...runs.map((c, i) => h(`span.mc-mark${i ? '' : '.first'}`, { style: { left: `${((c.t - clip.in) / US) * pps}px` } }, String(c.angle + 1))));
   }
 
-  function renderTransitions() {
+  /** Transition chips on the cuts in view (t0..t1), plus a selected or focused one. */
+  function renderTransitions(t0, t1) {
     const keep = new Set();
     rows.forEach((row) => {
       if (row.track.kind !== 'video') return;
@@ -496,14 +510,16 @@ export function createTimeline(ctx) {
       for (let i = 0; i < clips.length - 1; i++) {
         const a = clips[i];
         const b = clips[i + 1];
-        if (Math.abs(b.start - T.clipEnd(a)) > 2000) continue;
+        const cut = T.clipEnd(a);
+        if (Math.abs(b.start - cut) > 2000) continue;
+        const id = a.id;
+        let chip = trChips.get(id);
+        if ((cut < t0 || cut > t1) && store.transition !== id && !(chip && chip === document.activeElement)) continue;
         const has = Boolean(a.transition);
         // Show chips for existing transitions; others appear on hover as "add" targets.
-        const id = a.id;
         keep.add(id);
-        let chip = trChips.get(id);
         if (!chip) {
-          chip = h('button.tl-transition', { type: 'button' });
+          chip = h('button.tl-transition', { type: 'button' }, icon('transition', 12));
           chip.addEventListener('click', (e) => {
             e.stopPropagation();
             const clip = T.findClip(store.project, id)?.clip;
@@ -517,14 +533,18 @@ export function createTimeline(ctx) {
           trChips.set(id, chip);
         }
         const name = has ? TRANSITIONS.find((t) => t.id === a.transition.id)?.label || 'Transition' : null;
-        chip.className = `tl-transition${has ? ' has' : ''}${store.transition === id ? ' selected' : ''}`;
-        chip.setAttribute('aria-label', has ? `${name} transition between ${T.clipLabel(store.project, a)} and ${T.clipLabel(store.project, b)}` : `Add transition after ${T.clipLabel(store.project, a)}`);
-        chip.setAttribute('data-tip', has ? name : 'Add transition');
-        chip.replaceChildren(icon('transition', 12));
+        const label = has ? `${name} transition between ${T.clipLabel(store.project, a)} and ${T.clipLabel(store.project, b)}` : `Add transition after ${T.clipLabel(store.project, a)}`;
         const w = has ? Math.max(18, (a.transition.duration / US) * pps) : 18;
-        chip.style.left = `${timeToX(T.clipEnd(a)) - w / 2}px`;
-        chip.style.top = `${row.y + row.h / 2 - 9}px`;
-        chip.style.width = `${w}px`;
+        const sig = `${has}|${store.transition === id}|${label}|${name}|${timeToX(cut) - w / 2}|${row.y + row.h / 2 - 9}|${w}`;
+        if (chip._sig !== sig) {
+          chip._sig = sig;
+          chip.className = `tl-transition${has ? ' has' : ''}${store.transition === id ? ' selected' : ''}`;
+          chip.setAttribute('aria-label', label);
+          chip.setAttribute('data-tip', has ? name : 'Add transition');
+          chip.style.left = `${timeToX(cut) - w / 2}px`;
+          chip.style.top = `${row.y + row.h / 2 - 9}px`;
+          chip.style.width = `${w}px`;
+        }
         if (chip.parentNode !== content) content.append(chip);
       }
     });
@@ -539,7 +559,7 @@ export function createTimeline(ctx) {
   function placePlayhead() {
     const t = store.time;
     playhead.style.transform = `translateX(${timeToX(t)}px)`;
-    playhead.style.height = `${content.offsetHeight || 200}px`;
+    playhead.style.height = `${contentH || 200}px`;
     ruler.setAttribute('aria-valuenow', String(Math.round(t / US)));
     ruler.setAttribute('aria-valuetext', timecode(t, store.fps));
   }
@@ -767,8 +787,13 @@ export function createTimeline(ctx) {
     const p = contentPoint(e);
     if (e.button === 2) return; // context menu handles it
     if (!clipNode) {
-      // Empty area: seek and start a marquee.
-      tracksEl.focus?.();
+      // Empty area: seek and start a marquee. Focus stays where the view is.
+      // (The browser focuses the lanes again on the mousedown that follows.)
+      pointerFocus = true;
+      setTimeout(() => {
+        pointerFocus = false;
+      });
+      tracksEl.focus?.({ preventScroll: true });
       startMarquee(e, p);
       return;
     }
@@ -907,22 +932,31 @@ export function createTimeline(ctx) {
   function startMove(e, id, p0) {
     const { clip, track } = T.findClip(store.project, id);
     const kind = track.kind;
-    const moving = [...store.selection].filter((x) => T.findClip(store.project, x) && !T.findClip(store.project, x).track.locked);
-    if (!moving.includes(id)) moving.push(id);
+    // Where each moving clip starts, found in one pass (selections can hold thousands of clips).
+    const starts = new Map();
+    for (const t of store.project.tracks) {
+      if (t.locked) continue;
+      for (const c of t.clips) if (store.selection.has(c.id) || c.id === id) starts.set(c.id, c.start);
+    }
+    const moving = [...starts.keys()];
     const exclude = new Set(moving);
+    drag = { type: 'move', ids: exclude, cls: '', move: (ev) => move(ev), last: null };
     const points = T.snapPoints(store.project, { exclude, playhead: store.time });
     const nodes = moving.map((mid) => clipEls.get(mid)?.node).filter(Boolean);
     const origStart = clip.start;
     const startRow = rows.find((r) => r.track === track);
-    const minStart = Math.min(...moving.map((mid) => T.findClip(store.project, mid).clip.start));
+    let minStart = origStart;
+    for (const st of starts.values()) minStart = Math.min(minStart, st);
     let moved = false;
     let target = { start: origStart, trackId: track.id };
-    drag = { type: 'move' };
     const move = (ev) => {
+      drag.last = ev;
       const p = contentPoint(ev);
       if (!moved && Math.abs(p.x - p0.x) < 3 && Math.abs(p.y - p0.y) < 3) return;
+      autoScroll(ev); // reads layout, so before the writes below
       if (!moved) {
         moved = true;
+        drag.cls = 'dragging';
         player.pause();
         nodes.forEach((n) => n.classList.add('dragging'));
       }
@@ -962,11 +996,10 @@ export function createTimeline(ctx) {
         target = { start, trackId: track.id };
       }
       for (const n of nodes) {
-        const c = T.findClip(store.project, n.dataset.id)?.clip;
-        if (!c) continue;
-        n.style.transform = `translate(${timeToX(c.start + dt)}px, ${n.dataset.id === id ? dy : 0}px)`;
+        const st = starts.get(n.dataset.id);
+        if (st === undefined) continue;
+        n.style.transform = `translate(${timeToX(st + dt)}px, ${n.dataset.id === id ? dy : 0}px)`;
       }
-      autoScroll(ev);
     };
     const up = () => {
       tracksEl.removeEventListener('pointermove', move);
@@ -994,12 +1027,15 @@ export function createTimeline(ctx) {
     const origEdge = edge === 'start' ? clip.start : T.clipEnd(clip);
     let at = origEdge;
     let moved = false;
-    drag = { type: 'trim' };
+    drag = { type: 'trim', ids: new Set([id]), cls: '', move: (ev) => move(ev), last: null };
     const move = (ev) => {
+      drag.last = ev;
       const p = contentPoint(ev);
       if (!moved && Math.abs(p.x - p0.x) < 2) return;
+      autoScroll(ev); // reads layout, so before the writes below
       if (!moved) {
         moved = true;
+        drag.cls = 'trimming';
         player.pause();
         node.classList.add('trimming');
       }
@@ -1022,7 +1058,6 @@ export function createTimeline(ctx) {
       // Preview the frame at the new edge.
       player.setPreview(edge === 'start' ? at : Math.max(start, at - Math.round(US / store.fps)));
       tip.show(ev, `${edge === 'start' ? 'Start' : 'End'} ${timecode(at, store.fps)}  Duration ${timecode(end - start, store.fps)}`);
-      autoScroll(ev);
     };
     const up = () => {
       tracksEl.removeEventListener('pointermove', move);
@@ -1411,6 +1446,9 @@ export function createTimeline(ctx) {
 
   scroller.addEventListener('scroll', () => {
     drawRulerNow();
+    // Scrolling under a drag (edge auto-scroll or the wheel) moves it with the view. A
+    // press that hasn't started a drag yet stays put while playback scrolls the view.
+    if (drag?.last && drag.cls) drag.move(drag.last);
     queueRender();
     notifyView();
     if (centered) scrollSeek();
@@ -1587,14 +1625,19 @@ export function createTimeline(ctx) {
   tracksEl.tabIndex = 0;
   tracksEl.setAttribute('aria-label', 'Tracks. Use arrow keys to move between clips.');
   tracksEl.setAttribute('role', 'group');
+  // A click on empty space focuses too, but must not scroll the view to that clip.
+  let pointerFocus = false;
   tracksEl.addEventListener('focus', (e) => {
     if (e.target !== tracksEl) return;
     const sel = store.selectedIds[0];
     const first = sel || T.mainTrack(store.project)?.clips[0]?.id || T.allClips(store.project)[0]?.id;
     if (!first) return;
+    const fromPointer = pointerFocus;
     activeId = first;
     render();
-    clipEls.get(first)?.node.focus();
+    clipEls.get(first)?.node.focus({ preventScroll: true });
+    const clip = T.findClip(store.project, first)?.clip;
+    if (!fromPointer && clip) ensureVisible(clip);
   });
 
   // ---- Drops from the assets panel and the desktop ----------------------

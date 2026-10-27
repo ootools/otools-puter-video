@@ -120,6 +120,50 @@ describe('text details', () => {
     expect(normalizeClip(structuredClone(clip())).keyframes[COLOR_KEYS[2]]).toHaveLength(2);
   });
 
+  it('clearing highlights keeps keyboard focus in the section', () => {
+    env.el.querySelectorAll('.section-toggle[aria-expanded=false]').forEach((x) => x.click());
+    env.el.querySelector('.mark-chip').click();
+    const clear = button('Clear');
+    clear.focus();
+    clear.click();
+    expect(clip().marks).toBeUndefined();
+    expect(clear.disabled).toBe(true);
+    expect(document.activeElement).toBe(button('Pick key words'));
+  });
+
+  it('a keyed text color does not change with the playhead off the clip', () => {
+    env.store.seek(2 * US);
+    button('Add keyframe for color').click();
+    env.store.seek(8 * US);
+    const before = JSON.stringify(clip());
+    const steps = env.store.history.undoStack.length;
+    const hex = field('Color').querySelector('.hex-input');
+    for (const v of ['#FF0000', '#00FF00']) {
+      hex.focus();
+      hex.value = v;
+      hex.dispatchEvent(new Event('change'));
+    }
+    expect(JSON.stringify(clip())).toBe(before);
+    expect(env.store.history.undoStack.length).toBe(steps);
+    // The field goes back to the color shown, and a note says why (once).
+    expect(hex.value).toBe('#FFFFFF');
+    const notes = [...document.querySelectorAll('.toast')].filter((t) => t.textContent.includes('Move the playhead over the clip'));
+    expect(notes).toHaveLength(1);
+  });
+
+  it('removing the only color key keeps its color', () => {
+    env.store.seek(2 * US);
+    button('Add keyframe for color').click();
+    const hex = field('Color').querySelector('.hex-input');
+    hex.value = '#FF0000';
+    hex.dispatchEvent(new Event('change'));
+    expect(clip().style.color).toBe('#ffffff');
+    button('Remove color keyframe').click();
+    for (const k of COLOR_KEYS) expect(clip().keyframes[k]).toBeUndefined();
+    expect(clip().style.color).toBe('#ff0000');
+    expect(hex.value).toBe('#FF0000');
+  });
+
   it('picks a bubble and a word-art effect', () => {
     tab('Bubble').click();
     expect(env.el.querySelectorAll('.bubble-grid [role=radio]').length).toBeGreaterThanOrEqual(21);
