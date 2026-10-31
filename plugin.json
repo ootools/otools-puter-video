@@ -4,6 +4,18 @@
   "displayName": "Video Studio",
   "displayNameCN": "视频剪辑",
   "entry": "dist/index.html",
+  "fileAssociations": [
+    { "ext": "mp4", "desc": "MP4 视频", "mime": "video/mp4" },
+    { "ext": "mov", "desc": "QuickTime 视频", "mime": "video/quicktime" },
+    { "ext": "m4v", "desc": "M4V 视频", "mime": "video/x-m4v" },
+    { "ext": "mkv", "desc": "Matroska 视频", "mime": "video/x-matroska" },
+    { "ext": "webm", "desc": "WebM 视频", "mime": "video/webm" },
+    { "ext": "avi", "desc": "AVI 视频", "mime": "video/x-msvideo" },
+    { "ext": "wav", "desc": "WAV 音频", "mime": "audio/wav" },
+    { "ext": "mp3", "desc": "MP3 音频", "mime": "audio/mpeg" },
+    { "ext": "flac", "desc": "FLAC 无损音频", "mime": "audio/flac" },
+    { "ext": "m4a", "desc": "M4A 音频", "mime": "audio/mp4" }
+  ],
   "quickDev": true,
   "hasAd": false,
   "icon": "🎬",

@@ -39,6 +39,7 @@ import { installI18n, t } from './otools/i18n.js';
 import { installDomTranslation } from './otools/dom-i18n.js';
 import { installThemeFollow, primeThemeFromHost } from './otools/theme-sync.js';
 import { installMcpBridge } from './otools/mcp.js';
+import { installOpenFileBridge, onHostOpenFiles } from './otools/openfile.js';
 import { setVideoMcpContext, videoMcpTools } from './otools/mcp-tools.js';
 
 // 语言与主题都要在第一次渲染之前装好：
@@ -56,6 +57,47 @@ installThemeFollow();
 // 领域工具（工程列表/结构/新建/改名/打开）在 `otools/mcp-tools.js`，它们的活
 // 句柄由 `startOtools()` / `startLocal()` 在工程库就绪后交进来。
 installMcpBridge({ extraTools: videoMcpTools() });
+
+// 宿主投递的「打开文件」：本仓没有 boot.js，桥就装在这里（首屏渲染之前）。
+// 工程库要等 `startOtools` / `startLocal` 才就绪，所以投递先攒在
+// `pendingOpens` 里，库一就位就补开。
+installOpenFileBridge();
+
+/** 已收到但还没打开的文件（工程库未就绪时）。 */
+let pendingOpens = [];
+onHostOpenFiles((files) => {
+  pendingOpens = pendingOpens.concat(files);
+  void flushPendingOpens();
+});
+
+/**
+ * 打开宿主投递来的文件：`.zip` 是工程包（`xxx.video-studio.zip`），其余按素材
+ * 导入一个新工程——与首页「导入文件」同一条路。
+ */
+async function openDeliveredFile(file) {
+  try {
+    const record = await host.readFile(file.path);
+    if (!record) return;
+    const blob = host.base64ToBlob(record.dataBase64, record.mime);
+    const dropped = new File([blob], file.name, { type: record.mime });
+    if (/\.zip$/i.test(file.name)) {
+      await openBundle(dropped);
+      return;
+    }
+    await createProject({ ratio: 'original' }, [dropped]);
+  } catch (err) {
+    console.error('[otools] open delivered file failed', file.path, err);
+    toast(err?.message || t("Couldn't open the file."), { kind: 'error' });
+  }
+}
+
+/** 工程库就绪后把攒下的投递打开（幂等：没有投递时直接返回）。 */
+async function flushPendingOpens() {
+  if (!library || !pendingOpens.length) return;
+  const batch = pendingOpens;
+  pendingOpens = [];
+  for (const file of batch) await openDeliveredFile(file);
+}
 
 const root = document.getElementById('app');
 applyTheme();
@@ -184,6 +226,7 @@ async function startOtools() {
     editorContext: currentEditorContext,
   });
   route();
+  void flushPendingOpens();
 }
 
 /** 宿主不可用（把 dist/ 拖进普通浏览器）：退回上游的浏览器本地存储。 */
@@ -199,6 +242,7 @@ function startLocal(env) {
     editorContext: currentEditorContext,
   });
   route();
+  void flushPendingOpens();
 }
 
 /** 首页在的时候就刷一下列表（MCP 建/改名工程后，界面要跟着变）；在编辑器里则跳过。 */
