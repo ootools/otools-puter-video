@@ -48,6 +48,8 @@
 | `shell/overlay/index.html` | 入口：不加载 Puter SDK；主题跟随 OTools（宿主已经把 `dark`/`light` 类打在 `documentElement` 上） |
 | `shell/overlay/vite.config.js` | 产物落 `../dist`；`base: './'`；`server.fs.allow: ['..']` |
 | `shell/overlay/src/main.js` | 启动：宿主可用 → 本机目录；否则 → 上游的 OPFS 兜底。评审路由与 `puter.ui` 钩子删除 |
+| `shell/overlay/src/ui/menu.js` | 菜单：与上游同文件只差两处——定位改为调用 `menu-position.js`，并给菜单加 `ResizeObserver`（翻译改文案后宽度变化要重摆，否则子菜单按旧宽度错位）；键盘/焦点/关闭链保持原样 |
+| `shell/src/otools/menu-position.js` | 菜单定位：放不下时翻面，翻不过去就收缩 + 内部滚动，**不覆盖标题栏与父菜单**（上游会夹到视口边缘） |
 | `shell/src/otools/host.js` | 宿主桥：`window.otoolsVideo`（对话框 / 读写 / 列目录 / 建目录 / 删除 / 重命名 / 主题 / 诊断 / `invokeNative`） |
 | `shell/src/otools/backend.js` | `otoolsBackend`：实现上游 `storage/backends.js` 的接口，落到本机目录 |
 | `shell/src/otools/ui.js` | 界面胶水：工程目录卡片、`saveBlobAs`、`saveBlobToVideos`、`chooseExportPath`、`hostMessage` |
@@ -61,7 +63,7 @@
 | `native/` | Rust cdylib（`libotools_puter_video_native.dylib`）：探活 ffmpeg、组命令跑 `h264_videotoolbox`、一键 `brew install ffmpeg`。产物 `lib/<platform>.dylib` 由 `scripts/build-native.mjs` 生成 |
 | `shell/edits.mjs` | 局部改动清单（评审入口、Puter 文案、导出改宿主、原生 H.264 快路径、保存图标、语言菜单） |
 | `shell/drop.mjs` | 从构建树里删掉的路径（评审、上游的假 Puter 夹具）+ 删完之后必须还在的文件清单 |
-| `shell/tests/` | 移植层测试：i18n 运行时 / DOM 翻译层 / 原生编码器 / 编码探测 / 导出卡死 |
+| `shell/tests/` | 移植层测试：i18n 运行时 / DOM 翻译层 / 原生编码器 / 编码探测 / 导出卡死 / 菜单定位 |
 
 ## 多语言的规矩
 
