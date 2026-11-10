@@ -26,6 +26,43 @@
  */
 
 export const edits = [
+  {
+    file: 'src/engine/compositor.js',
+    find: "import { processSource } from './source-fx.js';",
+    replace: "import { processSource } from './source-fx.js';\nimport { recordingSource } from '../otools/recording-render.js';",
+    why: '录屏背景、缩放和鼠标在预览及所有导出的共享合成器渲染',
+  },
+  {
+    file: 'src/engine/compositor.js',
+    find: '    const info = this.resolve(layer);',
+    replace: '    const info = recordingSource(this, layer, this.resolve(layer));',
+    why: '使用 layer.sourceTime 合成源帧，裁切、分割和变速不改变录屏时间基准',
+  },
+  {
+    file: 'src/ui/inspector/video.js',
+    find: "import { removeEdit } from '../remove-edit-state.js';",
+    replace: "import { removeEdit } from '../remove-edit-state.js';\nimport { recordingSection } from '../../otools/recording-inspector.js';",
+    why: '录屏片段的可编辑缩放、背景和鼠标控件',
+  },
+  {
+    file: 'src/ui/inspector/video.js',
+    find: "return h('div', transformSection(view), blendSection(view), cropSection(view), appliedFilterSection(view), ...pictureSections(view));",
+    replace: "return h('div', recordingSection(view), transformSection(view), blendSection(view), cropSection(view), appliedFilterSection(view), ...pictureSections(view));",
+    why: '保留所有原生变换和遮罩控件，同时显示录屏源时间轴设置',
+  },
+  /* Recording projects retain their source timeline through every normalize/save cycle. */
+  {
+    file: 'src/model/project.js',
+    find: "import { normalizeClipExtras } from './clip-extras.js';",
+    replace: "import { normalizeClipExtras } from './clip-extras.js';\nimport { normalizeRecording } from '../otools/recording.js';",
+    why: '录屏工程扩展：验证并保留可编辑的源时间轴',
+  },
+  {
+    file: 'src/model/project.js',
+    find: '    normalizeClipExtras(c, out);',
+    replace: '    normalizeClipExtras(c, out);\n    const recording = c.type === \'video\' ? normalizeRecording(c.otoolsRecording) : null;\n    if (recording) out.otoolsRecording = recording;',
+    why: '录屏元数据不能在工程重开、分割或保存时被白名单丢掉',
+  },
   /* ============================================================ 评审 / 分享 */
   // 上游的「分享评审」是一整套 Puter 云能力：把 720p 评审副本传到 Puter 云盘、
   // 在用户账号里部署一个 worker、用 puter.kv 存评论、用邀请链接让别人登录评论。

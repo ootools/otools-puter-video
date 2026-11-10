@@ -41,6 +41,7 @@ import { installThemeFollow, primeThemeFromHost } from './otools/theme-sync.js';
 import { installMcpBridge } from './otools/mcp.js';
 import { installOpenFileBridge, onHostOpenFiles } from './otools/openfile.js';
 import { setVideoMcpContext, videoMcpTools } from './otools/mcp-tools.js';
+import { deliveryQueue, openNativeProject } from './otools/project-delivery.js';
 
 // 语言与主题都要在第一次渲染之前装好：
 //   - installI18n 解析出当前语言（宿主 → 用户覆盖 → 浏览器），并开始监听宿主切换；
@@ -63,12 +64,12 @@ installMcpBridge({ extraTools: videoMcpTools() });
 // `pendingOpens` 里，库一就位就补开。
 installOpenFileBridge();
 
-/** 已收到但还没打开的文件（工程库未就绪时）。 */
-let pendingOpens = [];
-onHostOpenFiles((files) => {
-  pendingOpens = pendingOpens.concat(files);
-  void flushPendingOpens();
-});
+let library = null;
+let account = null;
+let view = null;
+let routingReady = false;
+const opens = deliveryQueue(openDeliveredFile, () => Boolean(library) && routingReady);
+onHostOpenFiles((files) => { void opens.add(files); });
 
 /**
  * 打开宿主投递来的文件：`.zip` 是工程包（`xxx.video-studio.zip`），其余按素材
@@ -78,6 +79,25 @@ async function openDeliveredFile(file) {
   try {
     const record = await host.readFile(file.path);
     if (!record) return;
+    if (/\.json$/i.test(file.path)) {
+      let raw;
+      try { raw = JSON.parse(new TextDecoder().decode(host.base64ToBytes(record.dataBase64))); } catch { /* Ordinary media handling below. */ }
+      if (await openNativeProject(file.path, raw, {
+        prepareToLeave: () => view?.prepareToLeave?.(),
+        activate: async (next, project, libraryRoot) => {
+          if (project.deletedAt) { next.dispose(); throw new Error(t('This project is in the Trash.')); }
+          // Load the editor before changing ownership so a failed import leaves the old view alive.
+          const { Editor } = await import('./ui/editor.js');
+          view?.dispose?.();
+          const previous = library;
+          library = next;
+          setVideoMcpContext({ library, libraryRoot, openProject, refreshHome: refreshHomeIfVisible, editorContext: currentEditorContext });
+          mountProject(Editor, project);
+          // Old library uploads may still be finishing; do not cancel them on a workspace switch.
+          if (!previous.uploads.size && !previous.failed.size) previous.dispose();
+        },
+      })) return;
+    }
     const blob = host.base64ToBlob(record.dataBase64, record.mime);
     const dropped = new File([blob], file.name, { type: record.mime });
     if (/\.zip$/i.test(file.name)) {
@@ -91,21 +111,9 @@ async function openDeliveredFile(file) {
   }
 }
 
-/** 工程库就绪后把攒下的投递打开（幂等：没有投递时直接返回）。 */
-async function flushPendingOpens() {
-  if (!library || !pendingOpens.length) return;
-  const batch = pendingOpens;
-  pendingOpens = [];
-  for (const file of batch) await openDeliveredFile(file);
-}
-
 const root = document.getElementById('app');
 applyTheme();
 loadDsp();
-
-let library = null;
-let account = null;
-let view = null;
 
 function loading(text) {
   root.setAttribute('aria-busy', 'true');
@@ -129,7 +137,8 @@ function showHome() {
   });
 }
 
-async function openProject(id, files) {
+async function openProject(id, files, { prepared = false } = {}) {
+  if (!prepared && !view?._disposed && (await view?.prepareToLeave?.()) === false) return;
   view?.dispose?.();
   loading(t('Opening project...'));
   let project;
@@ -147,15 +156,7 @@ async function openProject(id, files) {
     return;
   }
   const { Editor } = await import('./ui/editor.js');
-  view = new Editor(root, {
-    library,
-    project,
-    account,
-    onExit: () => showHome(),
-    onNewProject: () => createProject({ ratio: 'original' }),
-    onOpenProject: (other) => openProject(other),
-  });
-  history.replaceState(null, '', `#project=${encodeURIComponent(id)}`);
+  mountProject(Editor, project);
   if (files?.length) {
     const assets = await view.ctx.actions.importFiles(files);
     let first = true;
@@ -167,12 +168,24 @@ async function openProject(id, files) {
   }
 }
 
+function mountProject(Editor, project) {
+  root.removeAttribute('aria-busy');
+  view = new Editor(root, {
+    library, project, account,
+    onExit: () => showHome(),
+    onNewProject: () => createProject({ ratio: 'original' }),
+    onOpenProject: (other) => openProject(other),
+  });
+  history.replaceState(null, '', `#project=${encodeURIComponent(project.id)}`);
+}
+
 async function createProject(opts = {}, files) {
+  if (!view?._disposed && (await view?.prepareToLeave?.()) === false) return;
   loading(t('Creating project...'));
   try {
     const n = (await library.listProjects()).length + 1;
     const project = await library.createProject({ name: `Project ${n}`, ratio: opts.ratio || 'original' });
-    await openProject(project.id, files);
+    await openProject(project.id, files, { prepared: true });
   } catch (err) {
     console.error(err);
     toast(t("Couldn't create a project."), { kind: 'error' });
@@ -181,10 +194,11 @@ async function createProject(opts = {}, files) {
 }
 
 async function openBundle(file) {
+  if (!view?._disposed && (await view?.prepareToLeave?.()) === false) return;
   loading(t('Opening project file...'));
   try {
     const { project } = await importProjectBundle(library, file);
-    await openProject(project.id);
+    await openProject(project.id, null, { prepared: true });
   } catch (err) {
     console.error(err);
     toast(err?.message || t("Couldn't open the project file."), { kind: 'error' });
@@ -225,12 +239,13 @@ async function startOtools() {
     refreshHome: refreshHomeIfVisible,
     editorContext: currentEditorContext,
   });
-  route();
-  void flushPendingOpens();
+  await route();
+  routingReady = true;
+  void opens.flush();
 }
 
 /** 宿主不可用（把 dist/ 拖进普通浏览器）：退回上游的浏览器本地存储。 */
-function startLocal(env) {
+async function startLocal(env) {
   library = new Library(opfsAvailable() ? opfsBackend() : memoryBackend());
   account = { user: null, env, picture: null };
   // 浏览器兜底没有「工程目录」，依赖磁盘的工具（导入/导出）会给出明确报错。
@@ -241,8 +256,9 @@ function startLocal(env) {
     refreshHome: refreshHomeIfVisible,
     editorContext: currentEditorContext,
   });
-  route();
-  void flushPendingOpens();
+  await route();
+  routingReady = true;
+  void opens.flush();
 }
 
 /** 首页在的时候就刷一下列表（MCP 建/改名工程后，界面要跟着变）；在编辑器里则跳过。 */
@@ -257,7 +273,7 @@ function currentEditorContext() {
 
 function route() {
   const m = /#project=([^&]+)/.exec(location.hash);
-  if (m) openProject(decodeURIComponent(m[1]));
+  if (m) return openProject(decodeURIComponent(m[1]));
   else showHome();
 }
 
