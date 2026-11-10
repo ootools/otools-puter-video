@@ -5,6 +5,7 @@ These features work with any video imported into Video Studio. Recording project
 ## Controls
 
 - Select a video clip and open **Basic → Focus and zoom**. Enable the effect, add zoom segments, choose a multiplier and either a fixed center or **Follow focal path**. Add focal points at source times and edit their X/Y positions to create a path. Smoothing controls how quickly the view follows that path. A video without points uses the segment's fixed center and does not show a fabricated pointer.
+- Clips with zoom segments show a dedicated strip at the bottom of the timeline clip. Each segment displays its multiplier and start/end handles. Click it to select the matching inspector segment; drag either handle to change its source-time boundary. Each drag is one undo step, Escape cancels, locked tracks cannot be edited, and ordinary clip trimming stays separate. The strip maps trimming and speed changes to the same source-time segments used by rendering. Smoothing remains a whole-clip parameter.
 - Open the project's existing frame/canvas settings and enable **Outer canvas frame**. Choose a color or gradient, padding and corner radius. This frames the entire composition, including camera, text and overlays, after global effects. The existing Canvas background controls the inner composition's empty areas.
 - Preview and export use the same compositor passes. Source-time focus paths stay aligned when a clip is trimmed, split or retimed. The normal clip transform, crop and masks remain available.
 

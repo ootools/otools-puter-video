@@ -1,7 +1,7 @@
 import { h } from '../lib/dom.js';
 import { sourceTimeAt } from '../model/timeline.js';
 import { slider, toggle, row, propSection, note } from '../ui/inspector/common.js';
-import { defaultFocusFollow } from './focus-follow.js';
+import { defaultFocusFollow, selectedFocusSegment, selectFocusSegment, setFocusSegmentEdge } from './focus-follow.js';
 
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -10,8 +10,9 @@ export function focusSection(view) {
   if (view.clip?.type !== 'video') return null;
   const defaults = () => defaultFocusFollow(view.clip, view.project.assets[view.clip.assetId]);
   const data = (c = view.clip) => c.focusFollow || defaults();
-  let selected = data().segments[0]?.id, selectedPoint = 0;
-  const zoom = (c = view.clip) => data(c).segments.find((z) => z.id === selected);
+  let selectedPoint = 0;
+  const selected = () => selectedFocusSegment(view.store, view.clip);
+  const zoom = (c = view.clip) => data(c).segments.find((z) => z.id === selected());
   const point = (c = view.clip) => data(c).points[selectedPoint];
   const edit = (label, fn, final = true) => {
     view.edit(label, (c) => { c.focusFollow ||= defaults(); fn(c.focusFollow); }, { key: `focus-${label}`, final });
@@ -24,9 +25,14 @@ export function focusSection(view) {
   body.append(boolean('Show path pointer', (p) => p.showPointer, (p, v) => { p.showPointer = v; }));
   body.append(boolean('Click effects', (p) => p.clickEffects, (p, v) => { p.clickEffects = v; }));
   body.append(slider(view, { label: 'Focus smoothing', min: 0, max: 2, step: 0.01, unit: 's', get: (c) => data(c).smoothing ?? 0.22, set: (v, final) => edit('Focus smoothing', (p) => { p.smoothing = v; }, final) }).el);
+  body.append(note('Smoothing applies to the focal path of the whole clip, not individual zoom segments.'));
 
   const select = h('select.input', { 'aria-label': 'Zoom segment' });
-  select.addEventListener('change', () => { selected = select.value; view.scope.update(); });
+  select.addEventListener('change', () => {
+    selectFocusSegment(view.store, view.id, select.value);
+    view.scope.update();
+    view.store.select(view.id);
+  });
   body.append(row('Zoom segment', select));
   const controls = h('div');
   const zoomNumber = (label, key, min, max, step, unit = '', factor = 1) => {
@@ -34,10 +40,9 @@ export function focusSection(view) {
       label, min, max, step, unit,
       get: (c) => (zoom(c)?.[key] ?? min / factor) * factor,
       set: (v, final) => edit(label, (p) => {
-        const i = p.segments.findIndex((z) => z.id === selected), z = p.segments[i];
+        const z = p.segments.find((z) => z.id === selected());
         if (!z) return;
-        if (key === 'start') z.start = clamp(v, p.segments[i - 1]?.end ?? 0, z.end - 0.01);
-        else if (key === 'end') z.end = clamp(v, z.start + 0.01, p.segments[i + 1]?.start ?? p.sourceDuration);
+        if (key === 'start' || key === 'end') setFocusSegmentEdge(p, z.id, key, v);
         else z[key] = clamp(v, min, max) / factor;
       }, final),
     }).el);
@@ -45,7 +50,7 @@ export function focusSection(view) {
   zoomNumber('Zoom start', 'start', 0, data().sourceDuration, 0.01, 's');
   zoomNumber('Zoom end', 'end', 0, data().sourceDuration, 0.01, 's');
   zoomNumber('Zoom multiplier', 'scale', 1, 6, 0.1, '×');
-  controls.append(toggle(view, { label: 'Follow focal path', get: (c) => zoom(c)?.follow ?? false, set: (v) => edit('Follow focal path', (p) => { const z = p.segments.find((z) => z.id === selected); if (z) z.follow = v; }) }).el);
+  controls.append(toggle(view, { label: 'Follow focal path', get: (c) => zoom(c)?.follow ?? false, set: (v) => edit('Follow focal path', (p) => { const z = p.segments.find((z) => z.id === selected()); if (z) z.follow = v; }) }).el);
   zoomNumber('Zoom center X', 'x', 0, 100, 0.1, '%', 100);
   zoomNumber('Zoom center Y', 'y', 0, 100, 0.1, '%', 100);
   body.append(controls);
@@ -57,12 +62,13 @@ export function focusSection(view) {
       const start = clamp(position, 0, p.sourceDuration - 0.01);
       const end = Math.min(start + 2, p.segments.find((z) => z.start > start)?.start ?? p.sourceDuration);
       if (p.segments.some((z) => start >= z.start && start < z.end) || end < start + 0.01) return;
-      selected = crypto.randomUUID();
-      p.segments.push({ id: selected, start, end, scale: 2, follow: false, x: 0.5, y: 0.5 });
+      const id = crypto.randomUUID();
+      selectFocusSegment(view.store, view.id, id);
+      p.segments.push({ id, start, end, scale: 2, follow: false, x: 0.5, y: 0.5 });
       p.segments.sort((a, b) => a.start - b.start);
     });
   });
-  remove.addEventListener('click', () => edit('Remove zoom segment', (p) => { p.segments = p.segments.filter((z) => z.id !== selected); selected = p.segments[0]?.id; }));
+  remove.addEventListener('click', () => edit('Remove zoom segment', (p) => { p.segments = p.segments.filter((z) => z.id !== selected()); }));
   body.append(h('div.section-actions', add, remove));
 
   body.append(note('Add focal points at source times to animate the focus. Enable Follow focal path on a zoom segment to use them.'));
@@ -103,14 +109,13 @@ export function focusSection(view) {
   let signature, pointSignature;
   const sync = () => {
     const p = data();
-    body.hidden = !p.enabled;
-    if (!p.segments.some((z) => z.id === selected)) selected = p.segments[0]?.id;
+    body.hidden = !p.enabled && !p.segments.length;
     const next = p.segments.map((z) => `${z.id}:${z.start}:${z.end}`).join('|');
     if (next !== signature) {
       signature = next;
       select.replaceChildren(...p.segments.map((z, i) => h('option', { value: z.id }, `${i + 1} · ${z.start.toFixed(2)}–${z.end.toFixed(2)} s`)));
     }
-    select.value = selected || '';
+    select.value = selected() || '';
     select.disabled = controls.hidden = remove.disabled = !p.segments.length;
     selectedPoint = clamp(selectedPoint, 0, Math.max(0, p.points.length - 1));
     // Large imported paths stay editable without mounting millions of option nodes.

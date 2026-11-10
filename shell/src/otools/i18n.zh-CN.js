@@ -30,6 +30,7 @@ export default {
   'Show path pointer': '显示路径指针',
   'Click effects': '点击效果',
   'Focus smoothing': '焦点平滑时间',
+  'Smoothing applies to the focal path of the whole clip, not individual zoom segments.': '平滑时间应用于整个视频片段的焦点路径，不单独应用于各缩放片段。',
   'Zoom segment': '缩放片段',
   'Zoom start': '缩放开始',
   'Zoom end': '缩放结束',

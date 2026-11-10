@@ -27,6 +27,30 @@
 
 export const edits = [
   {
+    file: 'src/ui/timeline/timeline.js',
+    find: "import { pref, onPrefsChange } from '../preferences-dialog.js';",
+    replace: "import { pref, onPrefsChange } from '../preferences-dialog.js';\nimport { createFocusTimeline } from '../../otools/focus-timeline.js';",
+    why: '焦点时间轴在移植层实现，复用源时间 segments',
+  },
+  {
+    file: 'src/ui/timeline/timeline.js',
+    find: '  const xToTime = (x) => Math.max(0, ((x - PAD) / pps) * US);',
+    replace: '  const xToTime = (x) => Math.max(0, ((x - PAD) / pps) * US);\n  const focusTimeline = createFocusTimeline(ctx, { projectTime: (e) => xToTime(contentPoint(e).x), pixelsPerSecond: () => pps });',
+    why: '共享时间轴缩放和滚动后的工程时间映射',
+  },
+  {
+    file: 'src/ui/timeline/timeline.js',
+    find: '        const label = clipText(clip);',
+    replace: '        focusTimeline.render(e.node, clip, row.track);\n        const label = clipText(clip);',
+    why: '已有缩放段在可见 clip 底部显示并同步选中、撤销与倍率变化',
+  },
+  {
+    file: 'src/ui/timeline/timeline.js',
+    find: '      kfPanel.dispose();',
+    replace: '      focusTimeline.dispose();\n      kfPanel.dispose();',
+    why: '关闭时间轴时取消未提交的焦点拖动',
+  },
+  {
     file: 'src/engine/compositor.js',
     find: "import { processSource } from './source-fx.js';",
     replace: "import { processSource } from './source-fx.js';\nimport { focusSource } from '../otools/focus-render.js';\nimport { presentCanvasFrame } from '../otools/canvas-frame.js';",

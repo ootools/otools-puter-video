@@ -1,0 +1,56 @@
+/* A dedicated bottom lane leaves the title and upper clip trim targets intact. */
+.tl-clip.has-focus-strip .clip-trim { bottom: 17px; }
+.tl-clip.has-focus-strip .clip-kf { bottom: 18px; }
+.focus-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 16px;
+  z-index: 4;
+  overflow: hidden;
+  background: var(--surface, #202830);
+  border-top: 1px solid var(--border, #64748b);
+  touch-action: none;
+  cursor: default;
+}
+.focus-strip[hidden] { display: none; }
+.focus-strip.focus-off { opacity: .65; }
+.focus-segment {
+  position: absolute;
+  top: 1px;
+  height: 14px;
+  border-radius: 2px;
+  background: #235b68;
+  color: #fff;
+  box-shadow: inset 0 0 0 1px #87c8d4;
+}
+.focus-strip button {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  font: 10px/14px sans-serif;
+  color: inherit;
+  background: transparent;
+  touch-action: none;
+}
+.focus-segment-select {
+  left: 0;
+  width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-align: center;
+  cursor: pointer;
+}
+.focus-segment-select[aria-pressed='true'] { background: #367f91; box-shadow: inset 0 0 0 2px #fff; }
+.focus-strip .focus-edge { width: var(--focus-handle, 7px); overflow: hidden; background: #153d48; cursor: ew-resize; }
+.focus-start { left: 0; border-inline-start: 2px solid #bdf5df !important; }
+.focus-end { right: 0; border-inline-end: 2px solid #ffe3b1 !important; }
+.focus-edge.clipped { border-style: dashed !important; }
+.focus-edge[aria-disabled='true'] { cursor: not-allowed; opacity: .6; }
+.focus-strip button:focus-visible { outline: 2px solid #fff; outline-offset: -2px; z-index: 1; }

@@ -45,6 +45,32 @@ export function normalizeFocusFollow(p) {
   };
 }
 
+/** Transient editor selection, shared by the inspector and timeline, never saved. */
+const selections = new WeakMap();
+export function selectedFocusSegment(store, clip) {
+  const selected = selections.get(store);
+  return (selected?.clipId === clip.id && clip.focusFollow?.segments.find((z) => z.id === selected.id)?.id)
+    || clip.focusFollow?.segments[0]?.id;
+}
+export function selectFocusSegment(store, clipId, id) {
+  selections.set(store, { clipId, id });
+}
+
+/** Shared source-second bounds; timeline edits additionally pass the visible source window. */
+export function setFocusSegmentEdge(p, id, edge, value, bounds = {}) {
+  const i = p.segments.findIndex((z) => z.id === id), z = p.segments[i];
+  if (!z || !Number.isFinite(value) || !['start', 'end'].includes(edge)) return false;
+  const lo = edge === 'start' ? Math.max(bounds.start ?? 0, p.segments[i - 1]?.end ?? 0)
+    : Math.max(bounds.start ?? 0, z.start + 0.01);
+  const hi = edge === 'start' ? Math.min(bounds.end ?? p.sourceDuration, z.end - 0.01)
+    : Math.min(bounds.end ?? p.sourceDuration, p.segments[i + 1]?.start ?? p.sourceDuration);
+  if (hi < lo) return false;
+  const next = clamp(value, lo, hi);
+  if (next === z[edge]) return false;
+  z[edge] = next;
+  return true;
+}
+
 // Analytic low-pass response to a linear focal path: independent of playback rate,
 // frame rate and seek order. A zero response time means exact linear interpolation.
 function positionAt(s, next, t, smoothing) {
